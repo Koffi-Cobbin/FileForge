@@ -3,8 +3,13 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from datetime import timedelta
+from dotenv import load_dotenv
+
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 SECRET_KEY = os.environ.get(
     "SESSION_SECRET",
@@ -13,7 +18,14 @@ SECRET_KEY = os.environ.get(
 
 DEBUG = os.environ.get("DJANGO_DEBUG", "1") == "1"
 
-ALLOWED_HOSTS = ["*"]
+# Detect if running on PythonAnywhere
+ON_PYTHONANYWHERE = 'PYTHONANYWHERE_DOMAIN' in os.environ or 'fileforge1.pythonanywhere.com' in os.environ.get('ALLOWED_HOSTS', '')
+
+# Allowed hosts configuration
+if ON_PYTHONANYWHERE or not DEBUG:
+    ALLOWED_HOSTS = ['fileforge1.pythonanywhere.com', 'www.fileforge1.pythonanywhere.com']
+else:
+    ALLOWED_HOSTS = ['localhost', '127.0.0.1', '*']
 
 CSRF_TRUSTED_ORIGINS = [
     'https://fileforge1.pythonanywhere.com',
@@ -79,8 +91,23 @@ TIME_ZONE = "UTC"
 USE_I18N = True
 USE_TZ = True
 
-STATIC_URL = "static/"
-STATIC_ROOT = BASE_DIR / "staticfiles"
+# Static files (CSS, JavaScript, Images)
+STATIC_URL = '/static/'
+
+if ON_PYTHONANYWHERE:
+    STATIC_ROOT = os.path.join(BASE_DIR, 'static')
+else:
+    STATIC_ROOT = BASE_DIR / 'staticfiles'
+
+STATICFILES_DIRS = []
+
+# Media files configuration
+MEDIA_URL = '/media/'
+
+if ON_PYTHONANYWHERE:
+    MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
+else:
+    MEDIA_ROOT = BASE_DIR / 'media'
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
@@ -101,6 +128,20 @@ REST_FRAMEWORK = {
         "rest_framework.renderers.BrowsableAPIRenderer",
     ],
 }
+
+# CORS settings
+if DEBUG:
+    CORS_ALLOW_ALL_ORIGINS = True
+else:
+    CORS_ALLOWED_ORIGINS = [
+        'https://fileforge1.pythonanywhere.com',
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:5000",
+        "http://127.0.0.1:5000"
+    ]
+
+CORS_ALLOW_CREDENTIALS = True
 
 # ---------------------------------------------------------------------------
 # FileForge configuration

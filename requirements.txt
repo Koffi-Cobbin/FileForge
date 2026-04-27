@@ -7,3 +7,4 @@ google-auth-httplib2>=0.2
 cloudinary>=1.40
 requests>=2.32
 gunicorn>=22.0
+python-dotenv>=0.21
