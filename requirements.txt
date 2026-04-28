@@ -1,6 +1,7 @@
 Django>=5.0,<5.2
 djangorestframework>=3.15
 djangorestframework-simplejwt>=5.3
+django-cors-headers>=4.3
 django-q2>=1.7
 google-api-python-client>=2.130
 google-auth>=2.30
