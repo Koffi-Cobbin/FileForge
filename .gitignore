@@ -47,6 +47,8 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+.replit
+.replit.md
 
 
 __pycache__/

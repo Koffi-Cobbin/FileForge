@@ -38,6 +38,559 @@ specific provider via a unified REST API.
 The `X-App-Owner` header identifies the calling app; rows are scoped per
 owner. Without the header the owner defaults to `default`.
 
+---
+
+### Sample Requests & Responses
+
+#### `GET /` — Service description
+
+```http
+GET / HTTP/1.1
+Host: localhost:5000
+```
+
+```json
+{
+  "service": "FileForge",
+  "description": "Pluggable cloud storage bridge",
+  "endpoints": {
+    "files_list_create": "/api/files/",
+    "file_detail": "/api/files/{id}/",
+    "direct_upload_init": "/api/files/direct-upload/",
+    "direct_upload_complete": "/api/files/direct-upload/complete/",
+    "providers": "/api/providers/",
+    "credentials": "/api/credentials/",
+    "health": "/api/health/"
+  }
+}
+```
+
+---
+
+#### `GET /api/health/` — Liveness probe
+
+```http
+GET /api/health/ HTTP/1.1
+Host: localhost:5000
+```
+
+```json
+{
+  "status": "ok",
+  "providers": ["cloudinary", "google_drive"]
+}
+```
+
+---
+
+#### `GET /api/providers/` — List providers and capabilities
+
+```http
+GET /api/providers/ HTTP/1.1
+Host: localhost:5000
+```
+
+```json
+{
+  "providers": [
+    {
+      "name": "cloudinary",
+      "supports_direct_upload": true
+    },
+    {
+      "name": "google_drive",
+      "supports_direct_upload": true
+    }
+  ]
+}
+```
+
+---
+
+#### `GET /api/credentials/` — List credentials for an owner
+
+```http
+GET /api/credentials/ HTTP/1.1
+Host: localhost:5000
+X-App-Owner: my-app
+```
+
+```json
+[
+  {
+    "id": 1,
+    "owner": "my-app",
+    "provider": "cloudinary",
+    "credentials": {
+      "cloud_name": "my-cloud",
+      "api_key": "123456789012345",
+      "api_secret": "••••••••••••••••••••••••"
+    },
+    "is_default": true,
+    "created_at": "2026-04-01T10:00:00Z",
+    "updated_at": "2026-04-01T10:00:00Z"
+  }
+]
+```
+
+---
+
+#### `POST /api/credentials/` — Create or update credentials
+
+```http
+POST /api/credentials/ HTTP/1.1
+Host: localhost:5000
+Content-Type: application/json
+X-App-Owner: my-app
+
+{
+  "provider": "cloudinary",
+  "credentials": {
+    "cloud_name": "my-cloud",
+    "api_key": "123456789012345",
+    "api_secret": "my-api-secret"
+  },
+  "is_default": true
+}
+```
+
+```json
+HTTP/1.1 201 Created
+
+{
+  "id": 1,
+  "owner": "my-app",
+  "provider": "cloudinary",
+  "credentials": {
+    "cloud_name": "my-cloud",
+    "api_key": "123456789012345",
+    "api_secret": "my-api-secret"
+  },
+  "is_default": true,
+  "created_at": "2026-04-01T10:00:00Z",
+  "updated_at": "2026-04-01T10:00:00Z"
+}
+```
+
+---
+
+#### `GET /api/credentials/{id}/` — Retrieve a credential
+
+```http
+GET /api/credentials/1/ HTTP/1.1
+Host: localhost:5000
+X-App-Owner: my-app
+```
+
+```json
+{
+  "id": 1,
+  "owner": "my-app",
+  "provider": "cloudinary",
+  "credentials": {
+    "cloud_name": "my-cloud",
+    "api_key": "123456789012345",
+    "api_secret": "my-api-secret"
+  },
+  "is_default": true,
+  "created_at": "2026-04-01T10:00:00Z",
+  "updated_at": "2026-04-01T10:00:00Z"
+}
+```
+
+---
+
+#### `PATCH /api/credentials/{id}/` — Update a credential
+
+```http
+PATCH /api/credentials/1/ HTTP/1.1
+Host: localhost:5000
+Content-Type: application/json
+X-App-Owner: my-app
+
+{
+  "credentials": {
+    "cloud_name": "my-cloud",
+    "api_key": "999999999999999",
+    "api_secret": "new-api-secret"
+  }
+}
+```
+
+```json
+{
+  "id": 1,
+  "owner": "my-app",
+  "provider": "cloudinary",
+  "credentials": {
+    "cloud_name": "my-cloud",
+    "api_key": "999999999999999",
+    "api_secret": "new-api-secret"
+  },
+  "is_default": true,
+  "created_at": "2026-04-01T10:00:00Z",
+  "updated_at": "2026-04-27T08:30:00Z"
+}
+```
+
+---
+
+#### `DELETE /api/credentials/{id}/` — Delete a credential
+
+```http
+DELETE /api/credentials/1/ HTTP/1.1
+Host: localhost:5000
+X-App-Owner: my-app
+```
+
+```
+HTTP/1.1 204 No Content
+```
+
+---
+
+#### `GET /api/files/` — List files for an owner
+
+```http
+GET /api/files/?provider=cloudinary HTTP/1.1
+Host: localhost:5000
+X-App-Owner: my-app
+```
+
+```json
+[
+  {
+    "id": 42,
+    "name": "profile-photo.jpg",
+    "size": 204800,
+    "content_type": "image/jpeg",
+    "provider": "cloudinary",
+    "provider_file_id": "profile-photo",
+    "url": "https://res.cloudinary.com/my-cloud/image/upload/profile-photo.jpg",
+    "status": "completed",
+    "error_message": "",
+    "owner": "my-app",
+    "metadata": {
+      "resource_type": "image",
+      "format": "jpg",
+      "bytes": 204800,
+      "version": 1711920000
+    },
+    "upload_strategy": "async_backend",
+    "created_at": "2026-04-10T12:00:00Z",
+    "updated_at": "2026-04-10T12:00:05Z"
+  }
+]
+```
+
+---
+
+#### `POST /api/files/` — Upload a file (multipart, ≤ sync threshold)
+
+Files at or below the provider's sync threshold (default 5 MB) are streamed
+to disk and handed off to a background worker. The response is returned
+immediately with `status: "pending"`.
+
+```http
+POST /api/files/ HTTP/1.1
+Host: localhost:5000
+Content-Type: multipart/form-data; boundary=----Boundary
+X-App-Owner: my-app
+
+------Boundary
+Content-Disposition: form-data; name="file"; filename="report.pdf"
+Content-Type: application/pdf
+
+<binary file data>
+------Boundary
+Content-Disposition: form-data; name="provider"
+
+cloudinary
+------Boundary
+Content-Disposition: form-data; name="name"
+
+q1-report.pdf
+------Boundary--
+```
+
+```json
+HTTP/1.1 202 Accepted
+
+{
+  "id": 43,
+  "name": "q1-report.pdf",
+  "size": 512000,
+  "content_type": "application/pdf",
+  "provider": "cloudinary",
+  "provider_file_id": null,
+  "url": null,
+  "status": "pending",
+  "error_message": "",
+  "owner": "my-app",
+  "metadata": {},
+  "upload_strategy": "async_backend",
+  "created_at": "2026-04-27T09:00:00Z",
+  "updated_at": "2026-04-27T09:00:00Z"
+}
+```
+
+Poll `GET /api/files/43/` until `status` becomes `"completed"` or `"failed"`.
+
+**Error — file exceeds hard upload limit (100 MB):**
+
+```json
+HTTP/1.1 413 Request Entity Too Large
+
+{
+  "detail": "File exceeds maximum upload size of 104857600 bytes."
+}
+```
+
+**Error — file exceeds provider sync threshold (use direct upload instead):**
+
+```json
+HTTP/1.1 413 Request Entity Too Large
+
+{
+  "detail": "File is too large for sync upload on this provider; use POST /files/direct-upload/ instead.",
+  "provider": "cloudinary",
+  "size": 12582912
+}
+```
+
+---
+
+#### `GET /api/files/{id}/` — Retrieve a file
+
+```http
+GET /api/files/43/ HTTP/1.1
+Host: localhost:5000
+X-App-Owner: my-app
+```
+
+```json
+{
+  "id": 43,
+  "name": "q1-report.pdf",
+  "size": 512000,
+  "content_type": "application/pdf",
+  "provider": "cloudinary",
+  "provider_file_id": "q1-report",
+  "url": "https://res.cloudinary.com/my-cloud/raw/upload/q1-report.pdf",
+  "status": "completed",
+  "error_message": "",
+  "owner": "my-app",
+  "metadata": {
+    "resource_type": "raw",
+    "format": "pdf",
+    "bytes": 512000,
+    "version": 1745744400
+  },
+  "upload_strategy": "async_backend",
+  "created_at": "2026-04-27T09:00:00Z",
+  "updated_at": "2026-04-27T09:00:06Z"
+}
+```
+
+---
+
+#### `PATCH /api/files/{id}/` — Rename a file
+
+```http
+PATCH /api/files/43/ HTTP/1.1
+Host: localhost:5000
+Content-Type: application/json
+X-App-Owner: my-app
+
+{
+  "name": "q1-report-final.pdf"
+}
+```
+
+```json
+{
+  "id": 43,
+  "name": "q1-report-final.pdf",
+  "size": 512000,
+  "content_type": "application/pdf",
+  "provider": "cloudinary",
+  "provider_file_id": "q1-report-final",
+  "url": "https://res.cloudinary.com/my-cloud/raw/upload/q1-report-final.pdf",
+  "status": "completed",
+  "error_message": "",
+  "owner": "my-app",
+  "metadata": {
+    "resource_type": "raw",
+    "format": "pdf",
+    "bytes": 512000,
+    "version": 1745744400
+  },
+  "upload_strategy": "async_backend",
+  "created_at": "2026-04-27T09:00:00Z",
+  "updated_at": "2026-04-27T09:15:00Z"
+}
+```
+
+---
+
+#### `DELETE /api/files/{id}/` — Delete a file
+
+Removes the record from FileForge and deletes the underlying object from the
+provider.
+
+```http
+DELETE /api/files/43/ HTTP/1.1
+Host: localhost:5000
+X-App-Owner: my-app
+```
+
+```
+HTTP/1.1 204 No Content
+```
+
+---
+
+#### `POST /api/files/direct-upload/` — Initiate a direct upload
+
+Use this flow for files that exceed the provider's sync threshold. FileForge
+returns a pre-signed URL; the client uploads directly to the provider without
+the bytes passing through FileForge.
+
+```http
+POST /api/files/direct-upload/ HTTP/1.1
+Host: localhost:5000
+Content-Type: application/json
+X-App-Owner: my-app
+
+{
+  "name": "large-video.mp4",
+  "provider": "cloudinary",
+  "size": 52428800,
+  "content_type": "video/mp4"
+}
+```
+
+```json
+HTTP/1.1 201 Created
+
+{
+  "file_id": 44,
+  "upload_url": "https://api.cloudinary.com/v1_1/my-cloud/video/upload",
+  "method": "POST",
+  "fields": {
+    "timestamp": "1745744400",
+    "public_id": "large-video",
+    "overwrite": "true",
+    "unique_filename": "false",
+    "use_filename": "false",
+    "api_key": "123456789012345",
+    "signature": "abc123def456..."
+  },
+  "headers": {},
+  "expires_in": null,
+  "provider_ref": {
+    "public_id": "large-video",
+    "resource_type": "video",
+    "folder": null
+  }
+}
+```
+
+The client then performs the actual upload directly against `upload_url` using
+the returned `method` and `fields`. For Cloudinary this is a multipart POST;
+for Google Drive it is a `PUT` to the resumable session URL.
+
+**Google Drive example response:**
+
+```json
+HTTP/1.1 201 Created
+
+{
+  "file_id": 45,
+  "upload_url": "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&upload_id=xyz...",
+  "method": "PUT",
+  "fields": {},
+  "headers": {
+    "Content-Type": "video/mp4"
+  },
+  "expires_in": null,
+  "provider_ref": {
+    "path": "large-video.mp4"
+  }
+}
+```
+
+---
+
+#### `POST /api/files/direct-upload/complete/` — Finalize a direct upload
+
+After the client has successfully uploaded the file to the provider, call
+this endpoint to record the result and mark the `File` as completed.
+
+```http
+POST /api/files/direct-upload/complete/ HTTP/1.1
+Host: localhost:5000
+Content-Type: application/json
+X-App-Owner: my-app
+
+{
+  "file_id": 44,
+  "provider_file_id": "large-video",
+  "url": "https://res.cloudinary.com/my-cloud/video/upload/large-video.mp4",
+  "provider_response": {
+    "public_id": "large-video",
+    "secure_url": "https://res.cloudinary.com/my-cloud/video/upload/large-video.mp4",
+    "resource_type": "video",
+    "format": "mp4",
+    "bytes": 52428800,
+    "version": 1745744500
+  }
+}
+```
+
+```json
+HTTP/1.1 200 OK
+
+{
+  "id": 44,
+  "name": "large-video.mp4",
+  "size": 52428800,
+  "content_type": "video/mp4",
+  "provider": "cloudinary",
+  "provider_file_id": "large-video",
+  "url": "https://res.cloudinary.com/my-cloud/video/upload/large-video.mp4",
+  "status": "completed",
+  "error_message": "",
+  "owner": "my-app",
+  "metadata": {
+    "resource_type": "video",
+    "format": "mp4",
+    "bytes": 52428800,
+    "version": 1745744500,
+    "provider_ref": {
+      "public_id": "large-video",
+      "resource_type": "video",
+      "folder": null
+    }
+  },
+  "upload_strategy": "direct",
+  "created_at": "2026-04-27T09:30:00Z",
+  "updated_at": "2026-04-27T09:30:45Z"
+}
+```
+
+**Error — provider finalization failed:**
+
+```json
+HTTP/1.1 502 Bad Gateway
+
+{
+  "detail": "Cloudinary finalize requires `public_id`."
+}
+```
+
+---
+
 ### Adding a new provider
 
 1. Create `storage/providers/<name>.py` subclassing `BaseStorageProvider`.

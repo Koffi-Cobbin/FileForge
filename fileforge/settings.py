@@ -21,7 +21,6 @@ DEBUG = os.environ.get("DJANGO_DEBUG", "1") == "1"
 # Detect if running on PythonAnywhere
 ON_PYTHONANYWHERE = 'PYTHONANYWHERE_DOMAIN' in os.environ or 'fileforge1.pythonanywhere.com' in os.environ.get('ALLOWED_HOSTS', '')
 
-# Allowed hosts configuration
 if ON_PYTHONANYWHERE or not DEBUG:
     ALLOWED_HOSTS = ['fileforge1.pythonanywhere.com', 'www.fileforge1.pythonanywhere.com']
 else:
@@ -46,7 +45,10 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "rest_framework",
+    "rest_framework_simplejwt",
+    "rest_framework_simplejwt.token_blacklist",
     "django_q",
+    "fileforge_auth",
     "storage",
 ]
 
@@ -61,6 +63,11 @@ MIDDLEWARE = [
 ]
 
 ROOT_URLCONF = "fileforge.urls"
+
+# ---------------------------------------------------------------------------
+# Custom user model
+# ---------------------------------------------------------------------------
+AUTH_USER_MODEL = "fileforge_auth.DeveloperUser"
 
 TEMPLATES = [
     {
@@ -91,19 +98,14 @@ TIME_ZONE = "UTC"
 USE_I18N = True
 USE_TZ = True
 
-# Static files (CSS, JavaScript, Images)
 STATIC_URL = '/static/'
-
 if ON_PYTHONANYWHERE:
     STATIC_ROOT = os.path.join(BASE_DIR, 'static')
 else:
     STATIC_ROOT = BASE_DIR / 'staticfiles'
-
 STATICFILES_DIRS = []
 
-# Media files configuration
 MEDIA_URL = '/media/'
-
 if ON_PYTHONANYWHERE:
     MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 else:
@@ -111,12 +113,18 @@ else:
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
+# ---------------------------------------------------------------------------
+# Django REST Framework
+# ---------------------------------------------------------------------------
 REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": [
-        "rest_framework.permissions.AllowAny",
+        # Storage API requires a valid API key by default.
+        # Management (auth) endpoints override this per-view.
+        "fileforge_auth.permissions.IsAuthenticatedApp",
     ],
     "DEFAULT_AUTHENTICATION_CLASSES": [
-        "rest_framework.authentication.SessionAuthentication",
+        "fileforge_auth.authentication.ApiKeyAuthentication",
+        "rest_framework_simplejwt.authentication.JWTAuthentication",
     ],
     "DEFAULT_PARSER_CLASSES": [
         "rest_framework.parsers.JSONParser",
@@ -127,6 +135,29 @@ REST_FRAMEWORK = {
         "rest_framework.renderers.JSONRenderer",
         "rest_framework.renderers.BrowsableAPIRenderer",
     ],
+}
+
+# ---------------------------------------------------------------------------
+# SimpleJWT
+# ---------------------------------------------------------------------------
+SIMPLE_JWT = {
+    "ACCESS_TOKEN_LIFETIME": timedelta(
+        minutes=int(os.environ.get("JWT_ACCESS_MINUTES", 30))
+    ),
+    "REFRESH_TOKEN_LIFETIME": timedelta(
+        days=int(os.environ.get("JWT_REFRESH_DAYS", 7))
+    ),
+    "ROTATE_REFRESH_TOKENS": True,
+    "BLACKLIST_AFTER_ROTATION": True,
+    "UPDATE_LAST_LOGIN": True,
+    "ALGORITHM": "HS256",
+    "SIGNING_KEY": SECRET_KEY,
+    "AUTH_HEADER_TYPES": ("Bearer",),
+    "USER_ID_FIELD": "id",
+    "USER_ID_CLAIM": "user_id",
+    "AUTH_TOKEN_CLASSES": ("rest_framework_simplejwt.tokens.AccessToken",),
+    # Return the developer's email in the token response for convenience.
+    "TOKEN_OBTAIN_SERIALIZER": "fileforge_auth.token_serializers.EmailTokenObtainPairSerializer",
 }
 
 # CORS settings
@@ -140,53 +171,37 @@ else:
         "http://localhost:5000",
         "http://127.0.0.1:5000"
     ]
-
 CORS_ALLOW_CREDENTIALS = True
 
 # ---------------------------------------------------------------------------
 # FileForge configuration
 # ---------------------------------------------------------------------------
-
 FILEFORGE_TEMP_DIR = Path(
     os.environ.get("FILEFORGE_TEMP_DIR", BASE_DIR / "tmp_uploads")
 )
 FILEFORGE_TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
-# Hard upload limit (bytes) enforced at the API layer.
 FILEFORGE_MAX_UPLOAD_SIZE = int(
-    os.environ.get("FILEFORGE_MAX_UPLOAD_SIZE", 100 * 1024 * 1024)  # 100 MB
+    os.environ.get("FILEFORGE_MAX_UPLOAD_SIZE", 100 * 1024 * 1024)
 )
 
-# Default sync threshold. Files at or below this size go through the async
-# backend upload path; larger files MUST use the direct upload flow.
 FILEFORGE_DEFAULT_MAX_SYNC_SIZE = int(
-    os.environ.get("FILEFORGE_DEFAULT_MAX_SYNC_SIZE", 5 * 1024 * 1024)  # 5 MB
+    os.environ.get("FILEFORGE_DEFAULT_MAX_SYNC_SIZE", 5 * 1024 * 1024)
 )
 
-# Per-provider overrides. Resolved by `utils.upload_strategy`.
 FILEFORGE_PROVIDER_MAX_SYNC_SIZE = {
     "google_drive": int(
-        os.environ.get(
-            "FILEFORGE_GOOGLE_DRIVE_MAX_SYNC_SIZE", 5 * 1024 * 1024
-        )
+        os.environ.get("FILEFORGE_GOOGLE_DRIVE_MAX_SYNC_SIZE", 5 * 1024 * 1024)
     ),
     "cloudinary": int(
-        os.environ.get(
-            "FILEFORGE_CLOUDINARY_MAX_SYNC_SIZE", 10 * 1024 * 1024
-        )
+        os.environ.get("FILEFORGE_CLOUDINARY_MAX_SYNC_SIZE", 10 * 1024 * 1024)
     ),
 }
 
-# Default credentials sourced from environment variables. These are merged with
-# (and overridden by) per-owner credentials stored in StorageCredential.
 FILEFORGE_PROVIDER_ENV_CREDENTIALS = {
     "google_drive": {
-        "service_account_json": os.environ.get(
-            "GOOGLE_SERVICE_ACCOUNT_JSON"
-        ),
-        "service_account_file": os.environ.get(
-            "GOOGLE_SERVICE_ACCOUNT_FILE"
-        ),
+        "service_account_json": os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON"),
+        "service_account_file": os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE"),
         "folder_id": os.environ.get("GOOGLE_DRIVE_FOLDER_ID"),
     },
     "cloudinary": {
@@ -197,14 +212,10 @@ FILEFORGE_PROVIDER_ENV_CREDENTIALS = {
     },
 }
 
-# Header used by external apps to identify themselves. The value is stored on
-# StorageCredential.owner and on File.owner so credentials are injected per
-# request without requiring a full auth system in this MVP.
+# Kept for backward-compat — new code reads owner from request.auth.app.owner_slug
 FILEFORGE_OWNER_HEADER = "X-App-Owner"
 FILEFORGE_DEFAULT_OWNER = os.environ.get("FILEFORGE_DEFAULT_OWNER", "default")
 
-# Django-Q2 (PythonAnywhere-compatible). Uses the ORM broker so we don't need
-# Redis or a separate process supervisor in development.
 Q_CLUSTER = {
     "name": "fileforge",
     "workers": int(os.environ.get("FILEFORGE_Q_WORKERS", 2)),
@@ -234,5 +245,6 @@ LOGGING = {
     "loggers": {
         "fileforge": {"handlers": ["console"], "level": "INFO", "propagate": False},
         "storage": {"handlers": ["console"], "level": "INFO", "propagate": False},
+        "fileforge_auth": {"handlers": ["console"], "level": "INFO", "propagate": False},
     },
 }

@@ -1,12 +1,17 @@
-"""DRF views for FileForge.
+"""DRF views for FileForge storage API.
 
-Views are deliberately thin: they validate input, talk to
-:class:`StorageManager` for any provider operation, and persist
-:class:`File` rows. They never import provider classes directly.
+Authentication is now handled by ``ApiKeyAuthentication``.  On a
+successfully authenticated request:
+    request.user  → DeveloperUser
+    request.auth  → ApiKey instance
+
+``_resolve_owner`` reads the owner slug directly from
+``request.auth.app.owner_slug``.  The legacy ``X-App-Owner`` header
+fallback is kept so that existing integrations and the test-runner
+continue to work during a transition period; it is ignored once a valid
+API key is present.
 """
 from __future__ import annotations
-
-from dataclasses import asdict
 
 from django.conf import settings
 from django.shortcuts import get_object_or_404
@@ -15,6 +20,10 @@ from rest_framework import generics, status
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
+
+from fileforge_auth.authentication import ApiKeyAuthentication
+from fileforge_auth.models import ApiKey
+from fileforge_auth.permissions import IsAuthenticatedApp
 
 from .models import File, FileStatus, StorageCredential
 from .providers import (
@@ -43,12 +52,23 @@ from .utils import (
 # Helpers
 # ---------------------------------------------------------------------------
 
-
 def _resolve_owner(request) -> str:
+    """Return the owner slug for the current request.
+
+    Priority:
+      1. API key auth  → owner_slug from the key's App (authoritative).
+      2. Legacy header → X-App-Owner (transition / dev convenience).
+      3. Default       → FILEFORGE_DEFAULT_OWNER setting.
+    """
+    if isinstance(request.auth, ApiKey):
+        return request.auth.app.owner_slug
+
+    # Legacy / unauthenticated fallback (dev mode or migration period).
     header = getattr(settings, "FILEFORGE_OWNER_HEADER", "X-App-Owner")
     value = request.headers.get(header)
     if value:
         return value.strip()
+
     return getattr(settings, "FILEFORGE_DEFAULT_OWNER", "default")
 
 
@@ -64,14 +84,22 @@ def _provider_error_response(exc: Exception) -> Response:
     return Response({"detail": str(exc)}, status=code)
 
 
+# Shared auth/permission applied to every storage view.
+_STORAGE_AUTH = {
+    "authentication_classes": [ApiKeyAuthentication],
+    "permission_classes": [IsAuthenticatedApp],
+}
+
+
 # ---------------------------------------------------------------------------
 # Files
 # ---------------------------------------------------------------------------
 
-
 class FileListCreateView(APIView):
-    """``GET /files/`` and ``POST /files/`` (hybrid upload)."""
+    """``GET /api/files/`` and ``POST /api/files/`` (hybrid upload)."""
 
+    authentication_classes = [ApiKeyAuthentication]
+    permission_classes = [IsAuthenticatedApp]
     parser_classes = (MultiPartParser, FormParser, JSONParser)
 
     def get(self, request):
@@ -80,8 +108,7 @@ class FileListCreateView(APIView):
         provider = request.query_params.get("provider")
         if provider:
             qs = qs.filter(provider=provider)
-        s = FileSerializer(qs, many=True)
-        return Response(s.data)
+        return Response(FileSerializer(qs, many=True).data)
 
     def post(self, request):
         serializer = FileUploadSerializer(data=request.data)
@@ -101,12 +128,7 @@ class FileListCreateView(APIView):
         size = getattr(upload, "size", None) or 0
         if size and size > max_upload:
             return Response(
-                {
-                    "detail": (
-                        f"File exceeds maximum upload size of "
-                        f"{max_upload} bytes."
-                    )
-                },
+                {"detail": f"File exceeds maximum upload size of {max_upload} bytes."},
                 status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             )
 
@@ -115,7 +137,7 @@ class FileListCreateView(APIView):
                 {
                     "detail": (
                         "File is too large for sync upload on this provider; "
-                        "use POST /files/direct-upload/ instead."
+                        "use POST /api/files/direct-upload/ instead."
                     ),
                     "provider": provider,
                     "size": size,
@@ -123,7 +145,6 @@ class FileListCreateView(APIView):
                 status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             )
 
-        # Stream to disk first — we never buffer the whole upload in memory.
         temp_path, real_size = save_to_temp(upload, original_name=original_name)
 
         file_obj = File.objects.create(
@@ -137,9 +158,6 @@ class FileListCreateView(APIView):
             upload_strategy="async_backend",
         )
 
-        # Schedule async work; fall back to in-process execution if django-q2
-        # cannot enqueue (e.g. no cluster running) so we still respect the
-        # spec's flow even in dev.
         try:
             async_task(
                 "storage.tasks.process_file_upload",
@@ -148,7 +166,6 @@ class FileListCreateView(APIView):
             )
         except Exception:
             from .tasks import process_file_upload
-
             process_file_upload(file_obj.id)
             file_obj.refresh_from_db()
 
@@ -159,7 +176,10 @@ class FileListCreateView(APIView):
 
 
 class FileDetailView(APIView):
-    """``GET``, ``PATCH``, ``DELETE`` on ``/files/{id}/``."""
+    """``GET``, ``PATCH``, ``DELETE`` on ``/api/files/{id}/``."""
+
+    authentication_classes = [ApiKeyAuthentication]
+    permission_classes = [IsAuthenticatedApp]
 
     def _get_file(self, request, pk):
         owner = _resolve_owner(request)
@@ -182,11 +202,7 @@ class FileDetailView(APIView):
                     name=new_name,
                     new_public_id=new_name,
                 )
-            except (
-                ProviderError,
-                ProviderConfigurationError,
-                ProviderUnsupportedOperation,
-            ) as exc:
+            except (ProviderError, ProviderConfigurationError, ProviderUnsupportedOperation) as exc:
                 return _provider_error_response(exc)
         s.save()
         return Response(FileSerializer(file_obj).data)
@@ -200,11 +216,7 @@ class FileDetailView(APIView):
                     file_obj.provider_file_id,
                     owner=file_obj.owner,
                 )
-            except (
-                ProviderError,
-                ProviderConfigurationError,
-                ProviderUnsupportedOperation,
-            ) as exc:
+            except (ProviderError, ProviderConfigurationError, ProviderUnsupportedOperation) as exc:
                 return _provider_error_response(exc)
         delete_temp_file(file_obj.temp_path)
         file_obj.delete()
@@ -215,9 +227,11 @@ class FileDetailView(APIView):
 # Direct upload
 # ---------------------------------------------------------------------------
 
-
 class DirectUploadInitView(APIView):
-    """``POST /files/direct-upload/`` — get a signed upload URL."""
+    """``POST /api/files/direct-upload/``."""
+
+    authentication_classes = [ApiKeyAuthentication]
+    permission_classes = [IsAuthenticatedApp]
 
     def post(self, request):
         serializer = DirectUploadInitSerializer(data=request.data)
@@ -230,17 +244,12 @@ class DirectUploadInitView(APIView):
 
         try:
             ticket = StorageManager.generate_upload_url(
-                provider,
-                name,
+                provider, name,
                 owner=owner,
                 content_type=content_type or None,
                 size=size,
             )
-        except (
-            ProviderError,
-            ProviderConfigurationError,
-            ProviderUnsupportedOperation,
-        ) as exc:
+        except (ProviderError, ProviderConfigurationError, ProviderUnsupportedOperation) as exc:
             return _provider_error_response(exc)
 
         file_obj = File.objects.create(
@@ -269,7 +278,10 @@ class DirectUploadInitView(APIView):
 
 
 class DirectUploadCompleteView(APIView):
-    """``POST /files/direct-upload/complete/`` — finalize a direct upload."""
+    """``POST /api/files/direct-upload/complete/``."""
+
+    authentication_classes = [ApiKeyAuthentication]
+    permission_classes = [IsAuthenticatedApp]
 
     def post(self, request):
         serializer = DirectUploadCompleteSerializer(data=request.data)
@@ -281,12 +293,9 @@ class DirectUploadCompleteView(APIView):
 
         payload = dict(serializer.validated_data.get("provider_response") or {})
         if serializer.validated_data.get("provider_file_id"):
-            payload["provider_file_id"] = serializer.validated_data[
-                "provider_file_id"
-            ]
+            payload["provider_file_id"] = serializer.validated_data["provider_file_id"]
         if serializer.validated_data.get("url"):
             payload["url"] = serializer.validated_data["url"]
-        # Pass along the provider_ref captured at init time.
         provider_ref = (file_obj.metadata or {}).get("provider_ref") or {}
         for k, v in provider_ref.items():
             payload.setdefault(k, v)
@@ -295,11 +304,7 @@ class DirectUploadCompleteView(APIView):
             result = StorageManager.finalize_direct_upload(
                 file_obj.provider, payload, owner=owner
             )
-        except (
-            ProviderError,
-            ProviderConfigurationError,
-            ProviderUnsupportedOperation,
-        ) as exc:
+        except (ProviderError, ProviderConfigurationError, ProviderUnsupportedOperation) as exc:
             file_obj.status = FileStatus.FAILED
             file_obj.error_message = str(exc)[:2000]
             file_obj.save(update_fields=["status", "error_message", "updated_at"])
@@ -312,16 +317,10 @@ class DirectUploadCompleteView(APIView):
         file_obj.metadata = merged_meta
         file_obj.status = FileStatus.COMPLETED
         file_obj.error_message = ""
-        file_obj.save(
-            update_fields=[
-                "provider_file_id",
-                "url",
-                "metadata",
-                "status",
-                "error_message",
-                "updated_at",
-            ]
-        )
+        file_obj.save(update_fields=[
+            "provider_file_id", "url", "metadata",
+            "status", "error_message", "updated_at",
+        ])
         return Response(FileSerializer(file_obj).data)
 
 
@@ -329,21 +328,23 @@ class DirectUploadCompleteView(APIView):
 # Providers + credentials
 # ---------------------------------------------------------------------------
 
-
 class ProviderListView(APIView):
-    """``GET /providers/`` — list available providers."""
+    """``GET /api/providers/`` — list available providers."""
+
+    authentication_classes = [ApiKeyAuthentication]
+    permission_classes = [IsAuthenticatedApp]
 
     def get(self, request):
         return Response({"providers": StorageManager.list_providers()})
 
 
 class StorageCredentialListCreateView(generics.ListCreateAPIView):
+    authentication_classes = [ApiKeyAuthentication]
+    permission_classes = [IsAuthenticatedApp]
     serializer_class = StorageCredentialSerializer
 
     def get_queryset(self):
-        return StorageCredential.objects.filter(
-            owner=_resolve_owner(self.request)
-        )
+        return StorageCredential.objects.filter(owner=_resolve_owner(self.request))
 
     def perform_create(self, serializer):
         owner = _resolve_owner(self.request)
@@ -359,21 +360,19 @@ class StorageCredentialListCreateView(generics.ListCreateAPIView):
 
 
 class StorageCredentialDetailView(generics.RetrieveUpdateDestroyAPIView):
+    authentication_classes = [ApiKeyAuthentication]
+    permission_classes = [IsAuthenticatedApp]
     serializer_class = StorageCredentialSerializer
 
     def get_queryset(self):
-        return StorageCredential.objects.filter(
-            owner=_resolve_owner(self.request)
-        )
+        return StorageCredential.objects.filter(owner=_resolve_owner(self.request))
 
 
 class HealthView(APIView):
-    """``GET /health/`` — liveness probe."""
+    """``GET /api/health/`` — liveness probe (public, no auth required)."""
+
+    authentication_classes = []
+    permission_classes = []
 
     def get(self, request):
-        return Response(
-            {
-                "status": "ok",
-                "providers": registry.names(),
-            }
-        )
+        return Response({"status": "ok", "providers": registry.names()})
