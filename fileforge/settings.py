@@ -19,9 +19,9 @@ SECRET_KEY = os.environ.get(
 DEBUG = os.environ.get("DJANGO_DEBUG", "1") == "1"
 
 # Detect if running on PythonAnywhere
-ON_PYTHONANYWHERE = 'PYTHONANYWHERE_DOMAIN' in os.environ or 'fileforge1.pythonanywhere.com' in os.environ.get('ALLOWED_HOSTS', '')
+ON_PYTHONANYWHERE = True
 
-if ON_PYTHONANYWHERE or not DEBUG:
+if not DEBUG:
     ALLOWED_HOSTS = ['fileforge1.pythonanywhere.com', 'www.fileforge1.pythonanywhere.com']
 else:
     ALLOWED_HOSTS = ['localhost', '127.0.0.1', '*']
