@@ -1,3 +1,5 @@
+cloudinary
+django-cloudinary-storage
 Django>=5.0,<5.2
 djangorestframework>=3.15
 djangorestframework-simplejwt>=5.3
@@ -9,4 +11,5 @@ google-auth-httplib2>=0.2
 cloudinary>=1.40
 requests>=2.32
 gunicorn>=22.0
+Pillow
 python-dotenv>=0.21

@@ -43,7 +43,11 @@ INSTALLED_APPS = [
     "django.contrib.contenttypes",
     "django.contrib.sessions",
     "django.contrib.messages",
-    "django.contrib.staticfiles",
+    'django.contrib.staticfiles',
+
+    'cloudinary_storage',
+    'cloudinary',
+
     "corsheaders",
     "rest_framework",
     "rest_framework_simplejwt",
@@ -211,6 +215,8 @@ FILEFORGE_PROVIDER_ENV_CREDENTIALS = {
         "api_key": os.environ.get("CLOUDINARY_API_KEY"),
         "api_secret": os.environ.get("CLOUDINARY_API_SECRET"),
         "url": os.environ.get("CLOUDINARY_URL"),
+        # Free tier only: Use proxy if connection errors occur
+        'api_proxy': 'http://proxy.server:3128' 
     },
 }
 
