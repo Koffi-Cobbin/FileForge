@@ -43,10 +43,16 @@ INSTALLED_APPS = [
     "django.contrib.contenttypes",
     "django.contrib.sessions",
     "django.contrib.messages",
+    # staticfiles must come BEFORE cloudinary_storage so Django's own
+    # static/media handling is not replaced by Cloudinary's backend.
     'django.contrib.staticfiles',
 
-    'cloudinary_storage',
+    # cloudinary must be listed before cloudinary_storage.
     'cloudinary',
+    # cloudinary_storage is present for the SDK's benefit; we explicitly
+    # keep DEFAULT_FILE_STORAGE and STATICFILES_STORAGE as Django's
+    # defaults below so it never takes over static/media serving.
+    'cloudinary_storage',
 
     "corsheaders",
     "rest_framework",
@@ -104,7 +110,14 @@ TIME_ZONE = "UTC"
 USE_I18N = True
 USE_TZ = True
 
+# ---------------------------------------------------------------------------
+# Static & media files — always use Django's local backends.
+# Explicitly set here so cloudinary_storage never silently takes over,
+# regardless of its own auto-configuration behaviour.
+# ---------------------------------------------------------------------------
 STATIC_URL = '/static/'
+STATICFILES_STORAGE = 'django.contrib.staticfiles.storage.StaticFilesStorage'
+
 if ON_PYTHONANYWHERE:
     STATIC_ROOT = os.path.join(BASE_DIR, 'static')
 else:
@@ -112,6 +125,8 @@ else:
 STATICFILES_DIRS = []
 
 MEDIA_URL = '/media/'
+DEFAULT_FILE_STORAGE = 'django.core.files.storage.FileSystemStorage'
+
 if ON_PYTHONANYWHERE:
     MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 else:
@@ -180,6 +195,37 @@ else:
 CORS_ALLOW_CREDENTIALS = True
 
 # ---------------------------------------------------------------------------
+# Cloudinary SDK configuration
+#
+# Keys follow the Cloudinary Python SDK convention (uppercase).
+# CLOUDINARY_URL, if set, takes priority over individual keys.
+#
+# api_proxy is required on PythonAnywhere free accounts where outbound
+# connections must go through their HTTP proxy.
+# ---------------------------------------------------------------------------
+_cloudinary_proxy = os.environ.get(
+    "CLOUDINARY_API_PROXY",
+    "http://proxy.server:3128" if ON_PYTHONANYWHERE else "",
+)
+
+CLOUDINARY_STORAGE = {
+    # Credentials — CLOUDINARY_URL wins if present.
+    'CLOUD_NAME': os.environ.get('CLOUDINARY_CLOUD_NAME', ''),
+    'API_KEY': os.environ.get('CLOUDINARY_API_KEY', ''),
+    'API_SECRET': os.environ.get('CLOUDINARY_API_SECRET', ''),
+    # Proxy — only injected when non-empty so local/Replit runs are unaffected.
+    **({'API_PROXY': _cloudinary_proxy} if _cloudinary_proxy else {}),
+    # Tell cloudinary_storage to use HTTPS everywhere.
+    'SECURE': True,
+    # Never let cloudinary_storage serve static or media files; FileForge
+    # handles uploads directly through its provider layer.
+    'MEDIA_TAG': 'fileforge_media',
+    'INVALID_VIDEO_ERROR_MESSAGE': 'Please upload a valid video file.',
+    'EXCLUDE_DELETE_ORPHANED_MEDIA_UNDER_FOLDER': '',
+    'SAVE_FILES_ON_MODEL_SAVE': False,
+}
+
+# ---------------------------------------------------------------------------
 # FileForge configuration
 # ---------------------------------------------------------------------------
 FILEFORGE_TEMP_DIR = Path(
@@ -215,8 +261,9 @@ FILEFORGE_PROVIDER_ENV_CREDENTIALS = {
         "api_key": os.environ.get("CLOUDINARY_API_KEY"),
         "api_secret": os.environ.get("CLOUDINARY_API_SECRET"),
         "url": os.environ.get("CLOUDINARY_URL"),
-        # Free tier only: Use proxy if connection errors occur
-        'api_proxy': 'http://proxy.server:3128' 
+        # Proxy for PythonAnywhere free tier — empty string means "no proxy"
+        # and the provider skips injecting it into cloudinary.config().
+        "api_proxy": _cloudinary_proxy,
     },
 }
 

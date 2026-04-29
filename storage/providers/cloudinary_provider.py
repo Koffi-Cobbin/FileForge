@@ -31,6 +31,9 @@ class CloudinaryProvider(BaseStorageProvider):
       * ``folder`` — folder prefix prepended to uploads.
       * ``resource_type`` — ``"auto"`` (default), ``"image"``, ``"video"``,
         or ``"raw"``.
+      * ``api_proxy`` — HTTP proxy URL required on PythonAnywhere free tier
+        (e.g. ``"http://proxy.server:3128"``).  An empty string or ``None``
+        means no proxy is configured.
     """
 
     name = "cloudinary"
@@ -44,7 +47,8 @@ class CloudinaryProvider(BaseStorageProvider):
     # Internals
     # ------------------------------------------------------------------
 
-    def _configure(self):
+    def _configure(self) -> None:
+        """Apply credentials to the global cloudinary config exactly once."""
         if self._configured:
             return
         try:
@@ -58,6 +62,7 @@ class CloudinaryProvider(BaseStorageProvider):
         cloud_name = self.credentials.get("cloud_name")
         api_key = self.credentials.get("api_key")
         api_secret = self.credentials.get("api_secret")
+
         if url:
             cloudinary.config(cloudinary_url=url)
         elif cloud_name and api_key and api_secret:
@@ -72,6 +77,14 @@ class CloudinaryProvider(BaseStorageProvider):
                 "Cloudinary provider requires either `url` or "
                 "`cloud_name`+`api_key`+`api_secret` in credentials."
             )
+
+        # Inject proxy after the main config so it is always applied,
+        # regardless of whether credentials came from a URL or individual keys.
+        api_proxy = self.credentials.get("api_proxy") or ""
+        if api_proxy:
+            cloudinary.config(api_proxy=api_proxy)
+            logger.debug("Cloudinary: using proxy %s", api_proxy)
+
         self._configured = True
 
     def _resource_type(self, override: str | None = None) -> str:
@@ -130,7 +143,13 @@ class CloudinaryProvider(BaseStorageProvider):
         import requests
 
         url = self.get_url(file_id, **kwargs)
-        resp = requests.get(url, timeout=60)
+
+        proxies: dict[str, str] = {}
+        api_proxy = self.credentials.get("api_proxy") or ""
+        if api_proxy:
+            proxies = {"http": api_proxy, "https": api_proxy}
+
+        resp = requests.get(url, timeout=60, proxies=proxies or None)
         if resp.status_code >= 300:
             raise ProviderError(
                 f"Cloudinary download failed: {resp.status_code}"
@@ -218,9 +237,10 @@ class CloudinaryProvider(BaseStorageProvider):
         if folder:
             params["folder"] = folder
 
-        api_secret = cloudinary.config().api_secret
-        api_key = cloudinary.config().api_key
-        cloud_name = cloudinary.config().cloud_name
+        cfg = cloudinary.config()
+        api_secret = cfg.api_secret
+        api_key = cfg.api_key
+        cloud_name = cfg.cloud_name
         if not (api_secret and api_key and cloud_name):
             raise ProviderConfigurationError(
                 "Cloudinary configuration is incomplete."
@@ -231,9 +251,11 @@ class CloudinaryProvider(BaseStorageProvider):
             f"https://api.cloudinary.com/v1_1/{cloud_name}/"
             f"{resource_type}/upload"
         )
-        fields = {**{k: str(v) for k, v in params.items()},
-                  "api_key": api_key,
-                  "signature": signature}
+        fields = {
+            **{k: str(v) for k, v in params.items()},
+            "api_key": api_key,
+            "signature": signature,
+        }
 
         return DirectUploadTicket(
             upload_url=upload_url,
@@ -257,6 +279,7 @@ class CloudinaryProvider(BaseStorageProvider):
             )
         secure_url = data.get("secure_url") or data.get("url")
         if not secure_url:
+            # get_url calls _configure() which ensures proxy is set.
             secure_url = self.get_url(
                 public_id,
                 resource_type=data.get("resource_type"),
