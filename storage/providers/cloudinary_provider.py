@@ -80,9 +80,15 @@ class CloudinaryProvider(BaseStorageProvider):
 
         # Inject proxy after the main config so it is always applied,
         # regardless of whether credentials came from a URL or individual keys.
+       # cloudinary_provider.py  –  inside _configure(), replace the proxy block
         api_proxy = self.credentials.get("api_proxy") or ""
         if api_proxy:
-            cloudinary.config(api_proxy=api_proxy)
+            cloudinary.config(api_proxy=api_proxy)          # Admin API calls
+            # Also tell the `requests` library (used by cloudinary.uploader)
+            # to route through the same proxy.
+            import os
+            os.environ.setdefault("HTTP_PROXY",  api_proxy)
+            os.environ.setdefault("HTTPS_PROXY", api_proxy)
             logger.debug("Cloudinary: using proxy %s", api_proxy)
 
         self._configured = True
