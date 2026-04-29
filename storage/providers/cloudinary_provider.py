@@ -43,6 +43,7 @@ class CloudinaryProvider(BaseStorageProvider):
         super().__init__(credentials)
         self._configured = False
 
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
@@ -78,7 +79,7 @@ class CloudinaryProvider(BaseStorageProvider):
         api_proxy = self.credentials.get("api_proxy") or ""
         if api_proxy:
             cloudinary.config(api_proxy=api_proxy)
-            self._patch_requests_proxy(api_proxy)
+            self._inject_proxy_into_cloudinary_session(api_proxy)
             logger.info("Cloudinary: proxy configured as %r", api_proxy)
         else:
             logger.warning("Cloudinary: NO proxy configured")
@@ -86,36 +87,41 @@ class CloudinaryProvider(BaseStorageProvider):
         self._configured = True
 
     @staticmethod
-    def _patch_requests_proxy(proxy_url: str) -> None:
-        """Force all requests.Sessions — including cloudinary's internal ones —
-        to route through proxy_url. This is necessary because cloudinary creates
-        sessions with trust_env=False, which ignores HTTP_PROXY/HTTPS_PROXY env vars.
+    def _inject_proxy_into_cloudinary_session(proxy_url: str) -> None:
+        """Directly update cloudinary's live HTTP session with the proxy.
+
+        Cloudinary's SDK holds a module-level requests.Session created at import
+        time with trust_env=False. Setting cloudinary.config(api_proxy=...) alone
+        is not enough — we must reach into the live session and update its proxies
+        dict so the very next request uses the proxy.
         """
         import requests
 
-        # Guard: only patch once per process.
-        if getattr(requests.Session, "_ff_proxy_patched", False):
-            return
+        proxies = {"http": proxy_url, "https": proxy_url}
 
-        _proxies = {"http": proxy_url, "https": proxy_url}
-        _original_init = requests.Session.__init__
-
-        def _patched_init(self, *args, **kwargs):
-            _original_init(self, *args, **kwargs)
-            self.proxies.update(_proxies)
-            self.trust_env = True  # also re-enable env var lookup
-
-        requests.Session.__init__ = _patched_init
-        requests.Session._ff_proxy_patched = True
-
-        # Also patch any sessions already alive inside the cloudinary module.
+        # 1. Patch the live session inside cloudinary.http_client (SDK ≥1.x).
         try:
-            import cloudinary.http_client as _http
-            if hasattr(_http, "session") and isinstance(_http.session, requests.Session):
-                _http.session.proxies.update(_proxies)
-                _http.session.trust_env = True
-        except Exception:
-            pass
+            import cloudinary.http_client as _http_client
+            session = getattr(_http_client, "session", None)
+            if isinstance(session, requests.Session):
+                session.proxies.update(proxies)
+                session.trust_env = True
+                logger.debug("Cloudinary: patched live http_client.session proxy")
+        except Exception as exc:
+            logger.warning("Cloudinary: could not patch http_client.session: %s", exc)
+
+        # 2. Monkey-patch Session.__init__ so any future sessions created by
+        #    cloudinary internals also pick up the proxy.
+        if not getattr(requests.Session, "_ff_proxy_patched", False):
+            _original_init = requests.Session.__init__
+
+            def _patched_init(self, *args, **kwargs):
+                _original_init(self, *args, **kwargs)
+                self.proxies.update(proxies)
+                self.trust_env = True
+
+            requests.Session.__init__ = _patched_init
+            requests.Session._ff_proxy_patched = True
 
 
     def _resource_type(self, override: str | None = None) -> str:
