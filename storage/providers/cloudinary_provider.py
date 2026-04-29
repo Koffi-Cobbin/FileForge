@@ -91,6 +91,12 @@ class CloudinaryProvider(BaseStorageProvider):
             os.environ.setdefault("HTTPS_PROXY", api_proxy)
             logger.debug("Cloudinary: using proxy %s", api_proxy)
 
+        if api_proxy:
+            cloudinary.config(api_proxy=api_proxy)
+            logger.info("Cloudinary: proxy configured as %r", api_proxy)  # change debug→info
+        else:
+            logger.warning("Cloudinary: NO proxy configured — uploads will fail on PythonAnywhere free tier")
+
         self._configured = True
 
     def _resource_type(self, override: str | None = None) -> str:
