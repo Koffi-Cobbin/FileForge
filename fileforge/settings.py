@@ -12,7 +12,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 SECRET_KEY = os.environ.get(
-    "SESSION_SECRET",
+    "SECRET_KEY",
     "django-insecure-dev-only-key-do-not-use-in-production",
 )
 
@@ -49,10 +49,6 @@ INSTALLED_APPS = [
 
     # cloudinary must be listed before cloudinary_storage.
     'cloudinary',
-    # cloudinary_storage is present for the SDK's benefit; we explicitly
-    # keep DEFAULT_FILE_STORAGE and STATICFILES_STORAGE as Django's
-    # defaults below so it never takes over static/media serving.
-    'cloudinary_storage',
 
     "corsheaders",
     "rest_framework",
@@ -207,23 +203,6 @@ _cloudinary_proxy = os.environ.get(
     "CLOUDINARY_API_PROXY",
     "http://proxy.server:3128" if ON_PYTHONANYWHERE else "",
 )
-
-CLOUDINARY_STORAGE = {
-    # Credentials — CLOUDINARY_URL wins if present.
-    'CLOUD_NAME': os.environ.get('CLOUDINARY_CLOUD_NAME', ''),
-    'API_KEY': os.environ.get('CLOUDINARY_API_KEY', ''),
-    'API_SECRET': os.environ.get('CLOUDINARY_API_SECRET', ''),
-    # Proxy — only injected when non-empty so local/Replit runs are unaffected.
-    **({'API_PROXY': _cloudinary_proxy} if _cloudinary_proxy else {}),
-    # Tell cloudinary_storage to use HTTPS everywhere.
-    'SECURE': True,
-    # Never let cloudinary_storage serve static or media files; FileForge
-    # handles uploads directly through its provider layer.
-    'MEDIA_TAG': 'fileforge_media',
-    'INVALID_VIDEO_ERROR_MESSAGE': 'Please upload a valid video file.',
-    'EXCLUDE_DELETE_ORPHANED_MEDIA_UNDER_FOLDER': '',
-    'SAVE_FILES_ON_MODEL_SAVE': False,
-}
 
 # ---------------------------------------------------------------------------
 # FileForge configuration
