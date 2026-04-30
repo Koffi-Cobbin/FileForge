@@ -84,19 +84,25 @@ def _provider_error_response(exc: Exception) -> Response:
     return Response({"detail": str(exc)}, status=code)
 
 
-# Shared auth/permission applied to every storage view.
-_STORAGE_AUTH = {
-    "authentication_classes": [ApiKeyAuthentication],
-    "permission_classes": [IsAuthenticatedApp],
-}
-
-
 # ---------------------------------------------------------------------------
 # Files
 # ---------------------------------------------------------------------------
 
 class FileListCreateView(APIView):
-    """``GET /api/files/`` and ``POST /api/files/`` (hybrid upload)."""
+    """``GET /api/files/`` and ``POST /api/files/`` (hybrid upload).
+
+    POST accepts an optional ``mode`` field:
+
+    * ``"async"`` (default) — queues a background task and returns 202
+      immediately with ``status: "pending"``.  The caller polls
+      ``GET /api/files/{id}/`` for the final outcome.
+
+    * ``"sync"`` — performs the provider upload inline and returns 200
+      with the final ``File`` state (``status: "completed"`` or
+      ``"failed"``).  Only accepted for files at or below the provider's
+      max sync size threshold; larger files must use the direct-upload
+      flow regardless of ``mode``.
+    """
 
     authentication_classes = [ApiKeyAuthentication]
     permission_classes = [IsAuthenticatedApp]
@@ -116,6 +122,7 @@ class FileListCreateView(APIView):
 
         upload = serializer.validated_data["file"]
         provider = serializer.validated_data["provider"]
+        mode = serializer.validated_data.get("mode", "async")
         owner = _resolve_owner(request)
         original_name = (
             serializer.validated_data.get("name")
@@ -155,9 +162,20 @@ class FileListCreateView(APIView):
             owner=owner,
             status=FileStatus.PENDING,
             temp_path=str(temp_path),
-            upload_strategy="async_backend",
+            upload_strategy=mode,
         )
 
+        if mode == "sync":
+            return self._upload_sync(file_obj)
+        else:
+            return self._upload_async(file_obj)
+
+    # ------------------------------------------------------------------
+    # Private upload helpers
+    # ------------------------------------------------------------------
+
+    def _upload_async(self, file_obj: File) -> Response:
+        """Queue a background task and return 202 immediately."""
         try:
             async_task(
                 "storage.tasks.process_file_upload",
@@ -165,6 +183,8 @@ class FileListCreateView(APIView):
                 task_name=f"upload-file-{file_obj.id}",
             )
         except Exception:
+            # If the queue is unavailable, fall back to an inline call so
+            # the upload is not silently lost.
             from .tasks import process_file_upload
             process_file_upload(file_obj.id)
             file_obj.refresh_from_db()
@@ -173,6 +193,26 @@ class FileListCreateView(APIView):
             FileSerializer(file_obj).data,
             status=status.HTTP_202_ACCEPTED,
         )
+
+    def _upload_sync(self, file_obj: File) -> Response:
+        """Run the provider upload inline and return the final File state."""
+        from .tasks import process_file_upload
+
+        process_file_upload(file_obj.id)
+        file_obj.refresh_from_db()
+
+        # Surface provider errors as a non-2xx response so callers don't
+        # have to inspect the status field to detect failures.
+        if file_obj.status == FileStatus.FAILED:
+            return Response(
+                {
+                    "detail": file_obj.error_message or "Upload failed.",
+                    "file": FileSerializer(file_obj).data,
+                },
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        return Response(FileSerializer(file_obj).data, status=status.HTTP_200_OK)
 
 
 class FileDetailView(APIView):

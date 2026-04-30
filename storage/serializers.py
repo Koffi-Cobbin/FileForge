@@ -50,11 +50,31 @@ class FilePatchSerializer(serializers.ModelSerializer):
 
 
 class FileUploadSerializer(serializers.Serializer):
-    """Body for ``POST /files/`` (multipart)."""
+    """Body for ``POST /files/`` (multipart).
+
+    ``mode`` controls the upload execution path:
+
+    * ``"async"`` (default) — the file is queued for background upload and
+      the response is returned immediately with ``status: "pending"``.
+      The caller should poll ``GET /files/{id}/`` until the status is
+      ``"completed"`` or ``"failed"``.
+
+    * ``"sync"`` — the upload to the provider is performed within the
+      request/response cycle.  The response is returned only after the
+      provider call completes (or fails), so the returned ``File`` object
+      will already carry ``status: "completed"`` or ``"failed"`` — no
+      polling required.  Only valid for files at or below the provider's
+      max sync size threshold.
+    """
 
     file = serializers.FileField()
     provider = serializers.CharField()
     name = serializers.CharField(required=False, allow_blank=True)
+    mode = serializers.ChoiceField(
+        choices=["async", "sync"],
+        default="async",
+        required=False,
+    )
 
     def validate_provider(self, value: str) -> str:
         if value not in registry:

@@ -559,3 +559,199 @@ class HealthViewTests(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.data["status"], "ok")
         self.assertIn("providers", resp.data)
+
+
+# ===========================================================================
+# Upload mode (sync / async)
+# ===========================================================================
+
+class UploadModeTests(TestCase):
+    """POST /api/files/ ``mode`` field — sync vs async behaviour."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.dev = make_developer(email="uploader@example.com", password="StrongPass123!")
+        self.app = make_app(self.dev, "Upload Mode App")
+        self.key, self.raw = make_api_key(self.app)
+
+    def _small_file(self, name="test.txt", content=b"hello"):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        return SimpleUploadedFile(name, content, content_type="text/plain")
+
+    # ------------------------------------------------------------------
+    # async mode (default)
+    # ------------------------------------------------------------------
+
+    @patch("storage.views.async_task")
+    def test_async_mode_returns_202_pending(self, mock_task):
+        """Default async mode queues a task and returns 202 with status pending."""
+        resp = self.client.post(
+            reverse("file-list"),
+            {"file": self._small_file(), "provider": "cloudinary", "mode": "async"},
+            format="multipart",
+            **bearer(self.raw),
+        )
+        self.assertEqual(resp.status_code, 202)
+        self.assertEqual(resp.data["status"], "pending")
+        self.assertEqual(resp.data["upload_strategy"], "async")
+        mock_task.assert_called_once()
+
+    @patch("storage.views.async_task")
+    def test_default_mode_is_async(self, mock_task):
+        """Omitting ``mode`` behaves identically to ``mode='async'``."""
+        resp = self.client.post(
+            reverse("file-list"),
+            {"file": self._small_file(), "provider": "cloudinary"},
+            format="multipart",
+            **bearer(self.raw),
+        )
+        self.assertEqual(resp.status_code, 202)
+        self.assertEqual(resp.data["status"], "pending")
+        mock_task.assert_called_once()
+
+    # ------------------------------------------------------------------
+    # sync mode — success path
+    # ------------------------------------------------------------------
+
+    @patch("storage.views.process_file_upload")
+    def test_sync_mode_returns_200_completed(self, mock_upload):
+        """Sync mode calls process_file_upload inline and returns 200."""
+        def _fake_upload(file_id):
+            File.objects.filter(pk=file_id).update(
+                status=FileStatus.COMPLETED,
+                provider_file_id="remote-id-123",
+                url="https://example.com/file.txt",
+                temp_path="",
+            )
+        mock_upload.side_effect = _fake_upload
+
+        resp = self.client.post(
+            reverse("file-list"),
+            {"file": self._small_file(), "provider": "cloudinary", "mode": "sync"},
+            format="multipart",
+            **bearer(self.raw),
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["status"], "completed")
+        self.assertEqual(resp.data["provider_file_id"], "remote-id-123")
+        self.assertEqual(resp.data["upload_strategy"], "sync")
+        mock_upload.assert_called_once()
+
+    @patch("storage.views.process_file_upload")
+    def test_sync_mode_no_polling_needed(self, mock_upload):
+        """A sync upload response contains a final status — no follow-up GET needed."""
+        def _fake_upload(file_id):
+            File.objects.filter(pk=file_id).update(
+                status=FileStatus.COMPLETED,
+                provider_file_id="xyz",
+                url="https://example.com/xyz",
+                temp_path="",
+            )
+        mock_upload.side_effect = _fake_upload
+
+        resp = self.client.post(
+            reverse("file-list"),
+            {"file": self._small_file(), "provider": "cloudinary", "mode": "sync"},
+            format="multipart",
+            **bearer(self.raw),
+        )
+        # Status is already terminal — caller doesn't need to poll.
+        self.assertIn(resp.data["status"], ["completed", "failed"])
+
+    # ------------------------------------------------------------------
+    # sync mode — failure path
+    # ------------------------------------------------------------------
+
+    @patch("storage.views.process_file_upload")
+    def test_sync_mode_provider_failure_returns_502(self, mock_upload):
+        """When the provider fails in sync mode the view returns 502 with detail."""
+        def _fake_failed_upload(file_id):
+            File.objects.filter(pk=file_id).update(
+                status=FileStatus.FAILED,
+                error_message="Cloudinary credentials invalid.",
+                temp_path="",
+            )
+        mock_upload.side_effect = _fake_failed_upload
+
+        resp = self.client.post(
+            reverse("file-list"),
+            {"file": self._small_file(), "provider": "cloudinary", "mode": "sync"},
+            format="multipart",
+            **bearer(self.raw),
+        )
+        self.assertEqual(resp.status_code, 502)
+        self.assertIn("detail", resp.data)
+        self.assertEqual(resp.data["detail"], "Cloudinary credentials invalid.")
+        # The file record is still accessible in the response body.
+        self.assertEqual(resp.data["file"]["status"], "failed")
+
+    @patch("storage.views.process_file_upload")
+    def test_sync_failure_file_record_persisted(self, mock_upload):
+        """Even on sync failure the File row exists and is queryable."""
+        def _fake_failed_upload(file_id):
+            File.objects.filter(pk=file_id).update(
+                status=FileStatus.FAILED,
+                error_message="Network error.",
+                temp_path="",
+            )
+        mock_upload.side_effect = _fake_failed_upload
+
+        resp = self.client.post(
+            reverse("file-list"),
+            {"file": self._small_file(), "provider": "cloudinary", "mode": "sync"},
+            format="multipart",
+            **bearer(self.raw),
+        )
+        self.assertEqual(resp.status_code, 502)
+        file_id = resp.data["file"]["id"]
+        detail_resp = self.client.get(
+            reverse("file-detail", kwargs={"pk": file_id}),
+            **bearer(self.raw),
+        )
+        self.assertEqual(detail_resp.status_code, 200)
+        self.assertEqual(detail_resp.data["status"], "failed")
+
+    # ------------------------------------------------------------------
+    # Invalid mode value
+    # ------------------------------------------------------------------
+
+    def test_invalid_mode_returns_400(self):
+        """An unrecognised mode value is rejected at the serializer level."""
+        resp = self.client.post(
+            reverse("file-list"),
+            {"file": self._small_file(), "provider": "cloudinary", "mode": "turbo"},
+            format="multipart",
+            **bearer(self.raw),
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("mode", resp.data)
+
+    # ------------------------------------------------------------------
+    # upload_strategy field reflects chosen mode
+    # ------------------------------------------------------------------
+
+    @patch("storage.views.async_task")
+    def test_upload_strategy_reflects_async_mode(self, mock_task):
+        resp = self.client.post(
+            reverse("file-list"),
+            {"file": self._small_file(), "provider": "cloudinary", "mode": "async"},
+            format="multipart",
+            **bearer(self.raw),
+        )
+        self.assertEqual(resp.data["upload_strategy"], "async")
+
+    @patch("storage.views.process_file_upload")
+    def test_upload_strategy_reflects_sync_mode(self, mock_upload):
+        def _complete(file_id):
+            File.objects.filter(pk=file_id).update(
+                status=FileStatus.COMPLETED, provider_file_id="x", temp_path=""
+            )
+        mock_upload.side_effect = _complete
+
+        resp = self.client.post(
+            reverse("file-list"),
+            {"file": self._small_file(), "provider": "cloudinary", "mode": "sync"},
+            format="multipart",
+            **bearer(self.raw),
+        )
+        self.assertEqual(resp.data["upload_strategy"], "sync")
