@@ -2,14 +2,36 @@
 
 The module is named ``cloudinary_provider`` to avoid shadowing the
 ``cloudinary`` PyPI package.
+
+Design note — why we own the HTTP connector
+--------------------------------------------
+``cloudinary.uploader`` creates its module-level ``_http`` connector at
+*import time* by calling ``utils.get_http_connector(cloudinary.config(), ...)``.
+At that moment ``cloudinary.config()`` is a blank global singleton, so the
+connector is always a plain ``PoolManager`` with no proxy — regardless of
+what we later pass to ``cloudinary.config(api_proxy=...)``.
+
+FileForge is multi-tenant: each developer has their own Cloudinary credentials
+(and potentially a different proxy setting).  We cannot use ``cloudinary.config()``
+safely because it is a process-wide singleton — writing one tenant's credentials
+would corrupt requests from another tenant.
+
+The solution is to bypass ``cloudinary.uploader.upload()`` entirely for the
+actual HTTP call and use our own per-instance urllib3 connector, built with
+the correct proxy from the start.  We still use cloudinary's *pure-Python*
+utilities (signing, URL building) which are stateless and safe to call from
+any thread.
 """
 from __future__ import annotations
 
-import io
+import hashlib
+import json
 import logging
-import os
 import time
 from typing import Any, BinaryIO, Mapping
+
+import certifi
+from urllib3 import PoolManager, ProxyManager
 
 from .base import (
     BaseStorageProvider,
@@ -30,12 +52,12 @@ class CloudinaryProvider(BaseStorageProvider):
       * ``url`` — a ``cloudinary://api_key:api_secret@cloud_name`` URL.
 
     Optional:
-      * ``folder`` — folder prefix prepended to uploads.
+      * ``folder``        — folder prefix prepended to uploads.
       * ``resource_type`` — ``"auto"`` (default), ``"image"``, ``"video"``,
-        or ``"raw"``.
-      * ``api_proxy`` — HTTP proxy URL required on PythonAnywhere free tier
-        (e.g. ``"http://proxy.server:3128"``).  An empty string or ``None``
-        means no proxy is configured.
+                            or ``"raw"``.
+      * ``api_proxy``     — HTTP proxy URL (required on PythonAnywhere free
+                            tier, e.g. ``"http://proxy.server:3128"``).
+                            Empty string / ``None`` → no proxy.
     """
 
     name = "cloudinary"
@@ -43,105 +65,81 @@ class CloudinaryProvider(BaseStorageProvider):
 
     def __init__(self, credentials: Mapping[str, Any] | None = None) -> None:
         super().__init__(credentials)
-        self._configured = False
-
+        self._cloud_name: str = ""
+        self._api_key: str = ""
+        self._api_secret: str = ""
+        self._http: PoolManager | ProxyManager | None = None  # built lazily
 
     # ------------------------------------------------------------------
-    # Internals
+    # Internal helpers
     # ------------------------------------------------------------------
 
-    def _configure(self) -> None:
-        if self._configured:
-            return
-        try:
-            import cloudinary
-        except ImportError as exc:
-            raise ProviderConfigurationError("cloudinary package is not installed") from exc
+    def _parse_cloudinary_url(self, url: str) -> tuple[str, str, str]:
+        """Parse ``cloudinary://key:secret@cloud`` → (cloud, key, secret)."""
+        # Format: cloudinary://api_key:api_secret@cloud_name
+        without_scheme = url.replace("cloudinary://", "")
+        auth, cloud = without_scheme.rsplit("@", 1)
+        key, secret = auth.split(":", 1)
+        return cloud.strip(), key.strip(), secret.strip()
+
+    def _ensure_credentials(self) -> None:
+        if self._cloud_name:
+            return  # already parsed
 
         url = self.credentials.get("url")
-        cloud_name = self.credentials.get("cloud_name")
-        api_key = self.credentials.get("api_key")
-        api_secret = self.credentials.get("api_secret")
-
         if url:
-            cloudinary.config(cloudinary_url=url)
-        elif cloud_name and api_key and api_secret:
-            cloudinary.config(
-                cloud_name=cloud_name,
-                api_key=api_key,
-                api_secret=api_secret,
-                secure=True,
+            self._cloud_name, self._api_key, self._api_secret = (
+                self._parse_cloudinary_url(url)
             )
-        else:
+            return
+
+        cloud = self.credentials.get("cloud_name", "").strip()
+        key = self.credentials.get("api_key", "").strip()
+        secret = self.credentials.get("api_secret", "").strip()
+        if not (cloud and key and secret):
             raise ProviderConfigurationError(
                 "Cloudinary provider requires either `url` or "
-                "`cloud_name`+`api_key`+`api_secret` in credentials."
+                "`cloud_name` + `api_key` + `api_secret` in credentials."
             )
+        self._cloud_name = cloud
+        self._api_key = key
+        self._api_secret = secret
 
-        api_proxy = self.credentials.get("api_proxy") or ""
-        if api_proxy:
-            cloudinary.config(api_proxy=api_proxy)
-            self._inject_proxy_into_cloudinary_session(api_proxy)
-            logger.info("Cloudinary: proxy configured as %r", api_proxy)
+    def _get_http(self) -> PoolManager | ProxyManager:
+        """Return a per-instance urllib3 connector, created once."""
+        if self._http is not None:
+            return self._http
+
+        kwargs = {"cert_reqs": "CERT_REQUIRED", "ca_certs": certifi.where()}
+        proxy = (self.credentials.get("api_proxy") or "").strip()
+        if proxy:
+            logger.info("Cloudinary: using proxy %r", proxy)
+            self._http = ProxyManager(proxy, **kwargs)
         else:
-            logger.warning("Cloudinary: NO proxy configured")
-
-        self._configured = True
-
-    @staticmethod
-    def _inject_proxy_into_cloudinary_session(proxy_url: str) -> None:
-        import requests
-
-        proxies = {"http": proxy_url, "https": proxy_url}
-
-        # Monkey-patch Session.__init__ so any future sessions pick up the proxy.
-        if not getattr(requests.Session, "_ff_proxy_patched", False):
-            _original_init = requests.Session.__init__
-
-            def _patched_init(self, *args, **kwargs):
-                _original_init(self, *args, **kwargs)
-                self.proxies.update(proxies)
-                self.trust_env = True
-
-            requests.Session.__init__ = _patched_init
-            requests.Session._ff_proxy_patched = True
-
-        # Force the cloudinary SDK to create its lazy session NOW (while the
-        # patched __init__ is in place), then update it directly.
-        try:
-            import cloudinary.http_client as _http_client
-            session = getattr(_http_client, "session", None)
-            if session is None:
-                # Trigger lazy session creation by calling a no-op request setup.
-                # The SDK creates the session on first use of get_http_connector().
-                if hasattr(_http_client, "get_http_connector"):
-                    _http_client.get_http_connector()
-                elif hasattr(_http_client, "HttpClient"):
-                    _http_client.HttpClient()
-                session = getattr(_http_client, "session", None)
-
-            if isinstance(session, requests.Session):
-                session.proxies.update(proxies)
-                session.trust_env = True
-                logger.info("Cloudinary: patched live http_client.session proxy")
-            else:
-                logger.info(
-                    "Cloudinary: session is %s — proxy will apply to next created session",
-                    type(session),
-                )
-        except Exception as exc:
-            logger.warning("Cloudinary: could not patch http_client.session: %s", exc)
-
+            self._http = PoolManager(**kwargs)
+        return self._http
 
     def _resource_type(self, override: str | None = None) -> str:
-        return (
-            override
-            or self.credentials.get("resource_type")
-            or "auto"
-        )
+        return override or self.credentials.get("resource_type") or "auto"
 
     def _folder(self) -> str | None:
         return self.credentials.get("folder") or None
+
+    def _sign(self, params: dict[str, Any]) -> str:
+        """Return a SHA-1 signature for ``params`` (Cloudinary v1 signing)."""
+        # Sort params, concatenate as key=value pairs, append secret, SHA-1.
+        to_sign = "&".join(
+            f"{k}={v}"
+            for k, v in sorted(params.items())
+            if v not in (None, "")
+        ) + self._api_secret
+        return hashlib.sha1(to_sign.encode()).hexdigest()  # noqa: S324
+
+    def _upload_url(self, resource_type: str) -> str:
+        return (
+            f"https://api.cloudinary.com/v1_1/{self._cloud_name}"
+            f"/{resource_type}/upload"
+        )
 
     # ------------------------------------------------------------------
     # Core CRUD
@@ -156,102 +154,153 @@ class CloudinaryProvider(BaseStorageProvider):
         size: int | None = None,
         **kwargs: Any,
     ) -> UploadResult:
-        self._configure()
-        import cloudinary.uploader
+        self._ensure_credentials()
+        resource_type = self._resource_type(kwargs.get("resource_type"))
+        timestamp = int(time.time())
 
-        options: dict[str, Any] = {
+        params: dict[str, Any] = {
             "public_id": path,
-            "resource_type": self._resource_type(kwargs.get("resource_type")),
-            "use_filename": False,
-            "unique_filename": False,
-            "overwrite": True,
+            "timestamp": timestamp,
+            "overwrite": "true",
+            "unique_filename": "false",
+            "use_filename": "false",
         }
         folder = self._folder()
         if folder:
-            options["folder"] = folder
+            params["folder"] = folder
+
+        signature = self._sign(params)
+
+        fields = {
+            **{k: str(v) for k, v in params.items()},
+            "api_key": self._api_key,
+            "signature": signature,
+        }
+
+        # Read file bytes — cloudinary requires the full body for a
+        # standard multipart upload.
+        file_bytes = file.read()
+        fields["file"] = (path, file_bytes, content_type or "application/octet-stream")
+
+        http = self._get_http()
         try:
-            response = cloudinary.uploader.upload(file, **options)
+            response = http.request(
+                "POST",
+                self._upload_url(resource_type),
+                fields=fields,
+            )
         except Exception as exc:
             raise ProviderError(f"Cloudinary upload failed: {exc}") from exc
 
+        if response.status >= 400:
+            raise ProviderError(
+                f"Cloudinary upload returned {response.status}: "
+                f"{response.data.decode(errors='replace')}"
+            )
+
+        data = json.loads(response.data)
         return UploadResult(
-            provider_file_id=response["public_id"],
-            url=response.get("secure_url") or response.get("url"),
+            provider_file_id=data["public_id"],
+            url=data.get("secure_url") or data.get("url"),
             metadata={
-                "resource_type": response.get("resource_type"),
-                "format": response.get("format"),
-                "bytes": response.get("bytes"),
-                "version": response.get("version"),
+                "resource_type": data.get("resource_type"),
+                "format": data.get("format"),
+                "bytes": data.get("bytes"),
+                "version": data.get("version"),
             },
         )
 
     def download(self, file_id: str, **kwargs: Any) -> bytes:
-        import requests
-
         url = self.get_url(file_id, **kwargs)
-
-        proxies: dict[str, str] = {}
-        api_proxy = self.credentials.get("api_proxy") or ""
-        if api_proxy:
-            proxies = {"http": api_proxy, "https": api_proxy}
-
-        resp = requests.get(url, timeout=60, proxies=proxies or None)
-        if resp.status_code >= 300:
+        http = self._get_http()
+        try:
+            response = http.request("GET", url)
+        except Exception as exc:
+            raise ProviderError(f"Cloudinary download failed: {exc}") from exc
+        if response.status >= 300:
             raise ProviderError(
-                f"Cloudinary download failed: {resp.status_code}"
+                f"Cloudinary download returned {response.status}"
             )
-        return resp.content
+        return response.data
 
     def delete(self, file_id: str, **kwargs: Any) -> None:
-        self._configure()
-        import cloudinary.uploader
-
+        self._ensure_credentials()
         resource_type = self._resource_type(kwargs.get("resource_type"))
-        # Cloudinary's destroy doesn't accept "auto"; default to "image".
         if resource_type == "auto":
             resource_type = "image"
+
+        timestamp = int(time.time())
+        params = {"public_id": file_id, "timestamp": timestamp}
+        signature = self._sign(params)
+
+        fields = {
+            "public_id": file_id,
+            "timestamp": str(timestamp),
+            "api_key": self._api_key,
+            "signature": signature,
+        }
+        url = (
+            f"https://api.cloudinary.com/v1_1/{self._cloud_name}"
+            f"/{resource_type}/destroy"
+        )
+        http = self._get_http()
         try:
-            response = cloudinary.uploader.destroy(
-                file_id, resource_type=resource_type, invalidate=True
-            )
-        except Exception as exc:  # pragma: no cover
+            response = http.request("POST", url, fields=fields)
+        except Exception as exc:
             raise ProviderError(f"Cloudinary delete failed: {exc}") from exc
-        if response.get("result") not in {"ok", "not found"}:
-            raise ProviderError(
-                f"Cloudinary delete returned: {response!r}"
-            )
+
+        data = json.loads(response.data)
+        if data.get("result") not in {"ok", "not found"}:
+            raise ProviderError(f"Cloudinary delete returned: {data!r}")
 
     def update(self, file_id: str, **kwargs: Any) -> dict[str, Any]:
-        self._configure()
-        import cloudinary.uploader
-
+        """Rename a file via the Cloudinary rename API."""
+        self._ensure_credentials()
         resource_type = self._resource_type(kwargs.get("resource_type"))
         if resource_type == "auto":
             resource_type = "image"
+
         new_id = kwargs.get("new_public_id") or kwargs.get("name")
         if not new_id:
             raise ProviderError(
                 "Cloudinary update requires `new_public_id` or `name`."
             )
+
+        timestamp = int(time.time())
+        params = {
+            "from_public_id": file_id,
+            "to_public_id": new_id,
+            "timestamp": timestamp,
+            "overwrite": "true",
+        }
+        signature = self._sign(params)
+        fields = {
+            **{k: str(v) for k, v in params.items()},
+            "api_key": self._api_key,
+            "signature": signature,
+        }
+        url = (
+            f"https://api.cloudinary.com/v1_1/{self._cloud_name}"
+            f"/{resource_type}/rename"
+        )
+        http = self._get_http()
         try:
-            response = cloudinary.uploader.rename(
-                file_id, new_id, resource_type=resource_type, overwrite=True
-            )
-        except Exception as exc:  # pragma: no cover
+            response = http.request("POST", url, fields=fields)
+        except Exception as exc:
             raise ProviderError(f"Cloudinary update failed: {exc}") from exc
-        return response
+
+        return json.loads(response.data)
 
     def get_url(self, file_id: str, **kwargs: Any) -> str:
-        self._configure()
-        import cloudinary.utils
-
+        self._ensure_credentials()
         resource_type = self._resource_type(kwargs.get("resource_type"))
         if resource_type == "auto":
             resource_type = "image"
-        url, _options = cloudinary.utils.cloudinary_url(
-            file_id, resource_type=resource_type, secure=True
+        # Cloudinary public URL pattern — no SDK needed.
+        return (
+            f"https://res.cloudinary.com/{self._cloud_name}"
+            f"/{resource_type}/upload/{file_id}"
         )
-        return url
 
     # ------------------------------------------------------------------
     # Direct upload (signed multipart POST)
@@ -266,15 +315,13 @@ class CloudinaryProvider(BaseStorageProvider):
         **kwargs: Any,
     ) -> DirectUploadTicket:
         """Return a signed POST endpoint and form fields for direct upload."""
-        self._configure()
-        import cloudinary
-        import cloudinary.utils
-
+        self._ensure_credentials()
         resource_type = self._resource_type(kwargs.get("resource_type"))
         timestamp = int(time.time())
+
         params: dict[str, Any] = {
-            "timestamp": timestamp,
             "public_id": path,
+            "timestamp": timestamp,
             "overwrite": "true",
             "unique_filename": "false",
             "use_filename": "false",
@@ -283,28 +330,15 @@ class CloudinaryProvider(BaseStorageProvider):
         if folder:
             params["folder"] = folder
 
-        cfg = cloudinary.config()
-        api_secret = cfg.api_secret
-        api_key = cfg.api_key
-        cloud_name = cfg.cloud_name
-        if not (api_secret and api_key and cloud_name):
-            raise ProviderConfigurationError(
-                "Cloudinary configuration is incomplete."
-            )
-
-        signature = cloudinary.utils.api_sign_request(params, api_secret)
-        upload_url = (
-            f"https://api.cloudinary.com/v1_1/{cloud_name}/"
-            f"{resource_type}/upload"
-        )
+        signature = self._sign(params)
         fields = {
             **{k: str(v) for k, v in params.items()},
-            "api_key": api_key,
+            "api_key": self._api_key,
             "signature": signature,
         }
 
         return DirectUploadTicket(
-            upload_url=upload_url,
+            upload_url=self._upload_url(resource_type),
             method="POST",
             fields=fields,
             provider_ref={
@@ -325,7 +359,6 @@ class CloudinaryProvider(BaseStorageProvider):
             )
         secure_url = data.get("secure_url") or data.get("url")
         if not secure_url:
-            # get_url calls _configure() which ensures proxy is set.
             secure_url = self.get_url(
                 public_id,
                 resource_type=data.get("resource_type"),

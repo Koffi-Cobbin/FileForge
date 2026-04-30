@@ -43,13 +43,7 @@ INSTALLED_APPS = [
     "django.contrib.contenttypes",
     "django.contrib.sessions",
     "django.contrib.messages",
-    # staticfiles must come BEFORE cloudinary_storage so Django's own
-    # static/media handling is not replaced by Cloudinary's backend.
-    'django.contrib.staticfiles',
-
-    # cloudinary must be listed before cloudinary_storage.
-    'cloudinary',
-
+    "django.contrib.staticfiles",
     "corsheaders",
     "rest_framework",
     "rest_framework_simplejwt",
@@ -107,9 +101,7 @@ USE_I18N = True
 USE_TZ = True
 
 # ---------------------------------------------------------------------------
-# Static & media files — always use Django's local backends.
-# Explicitly set here so cloudinary_storage never silently takes over,
-# regardless of its own auto-configuration behaviour.
+# Static & media files
 # ---------------------------------------------------------------------------
 STATIC_URL = '/static/'
 STATICFILES_STORAGE = 'django.contrib.staticfiles.storage.StaticFilesStorage'
@@ -135,8 +127,6 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # ---------------------------------------------------------------------------
 REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": [
-        # Storage API requires a valid API key by default.
-        # Management (auth) endpoints override this per-view.
         "fileforge_auth.permissions.IsAuthenticatedApp",
     ],
     "DEFAULT_AUTHENTICATION_CLASSES": [
@@ -173,11 +163,12 @@ SIMPLE_JWT = {
     "USER_ID_FIELD": "id",
     "USER_ID_CLAIM": "user_id",
     "AUTH_TOKEN_CLASSES": ("rest_framework_simplejwt.tokens.AccessToken",),
-    # Return the developer's email in the token response for convenience.
     "TOKEN_OBTAIN_SERIALIZER": "fileforge_auth.token_serializers.EmailTokenObtainPairSerializer",
 }
 
-# CORS settings
+# ---------------------------------------------------------------------------
+# CORS
+# ---------------------------------------------------------------------------
 if DEBUG:
     CORS_ALLOW_ALL_ORIGINS = True
 else:
@@ -186,23 +177,9 @@ else:
         "http://localhost:3000",
         "http://127.0.0.1:3000",
         "http://localhost:5000",
-        "http://127.0.0.1:5000"
+        "http://127.0.0.1:5000",
     ]
 CORS_ALLOW_CREDENTIALS = True
-
-# ---------------------------------------------------------------------------
-# Cloudinary SDK configuration
-#
-# Keys follow the Cloudinary Python SDK convention (uppercase).
-# CLOUDINARY_URL, if set, takes priority over individual keys.
-#
-# api_proxy is required on PythonAnywhere free accounts where outbound
-# connections must go through their HTTP proxy.
-# ---------------------------------------------------------------------------
-_cloudinary_proxy = os.environ.get(
-    "CLOUDINARY_API_PROXY",
-    "http://proxy.server:3128" if ON_PYTHONANYWHERE else "",
-)
 
 # ---------------------------------------------------------------------------
 # FileForge configuration
@@ -229,6 +206,20 @@ FILEFORGE_PROVIDER_MAX_SYNC_SIZE = {
     ),
 }
 
+# ---------------------------------------------------------------------------
+# Provider credentials
+#
+# These are the FileForge operator's own env-level defaults, merged with
+# per-owner StorageCredential rows at request time. Per-owner credentials
+# always win over these defaults.
+#
+# Cloudinary: the provider builds its own urllib3 ProxyManager per-instance
+# so api_proxy is just another credential key — no SDK globals are touched.
+#
+# PythonAnywhere free accounts require outbound HTTP to go through their
+# proxy. Set CLOUDINARY_API_PROXY to http://proxy.server:3128 (or leave it
+# unset on paid accounts / other hosts where direct connections are allowed).
+# ---------------------------------------------------------------------------
 FILEFORGE_PROVIDER_ENV_CREDENTIALS = {
     "google_drive": {
         "service_account_json": os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON"),
@@ -240,9 +231,10 @@ FILEFORGE_PROVIDER_ENV_CREDENTIALS = {
         "api_key": os.environ.get("CLOUDINARY_API_KEY"),
         "api_secret": os.environ.get("CLOUDINARY_API_SECRET"),
         "url": os.environ.get("CLOUDINARY_URL"),
-        # Proxy for PythonAnywhere free tier — empty string means "no proxy"
-        # and the provider skips injecting it into cloudinary.config().
-        "api_proxy": _cloudinary_proxy,
+        "api_proxy": os.environ.get(
+            "CLOUDINARY_API_PROXY",
+            "http://proxy.server:3128" if ON_PYTHONANYWHERE else "",
+        ),
     },
 }
 
