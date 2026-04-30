@@ -5,7 +5,9 @@ The module is named ``cloudinary_provider`` to avoid shadowing the
 """
 from __future__ import annotations
 
+import io
 import logging
+import os
 import time
 from typing import Any, BinaryIO, Mapping
 
@@ -88,30 +90,11 @@ class CloudinaryProvider(BaseStorageProvider):
 
     @staticmethod
     def _inject_proxy_into_cloudinary_session(proxy_url: str) -> None:
-        """Directly update cloudinary's live HTTP session with the proxy.
-
-        Cloudinary's SDK holds a module-level requests.Session created at import
-        time with trust_env=False. Setting cloudinary.config(api_proxy=...) alone
-        is not enough — we must reach into the live session and update its proxies
-        dict so the very next request uses the proxy.
-        """
         import requests
 
         proxies = {"http": proxy_url, "https": proxy_url}
 
-        # 1. Patch the live session inside cloudinary.http_client (SDK ≥1.x).
-        try:
-            import cloudinary.http_client as _http_client
-            session = getattr(_http_client, "session", None)
-            if isinstance(session, requests.Session):
-                session.proxies.update(proxies)
-                session.trust_env = True
-                logger.debug("Cloudinary: patched live http_client.session proxy")
-        except Exception as exc:
-            logger.warning("Cloudinary: could not patch http_client.session: %s", exc)
-
-        # 2. Monkey-patch Session.__init__ so any future sessions created by
-        #    cloudinary internals also pick up the proxy.
+        # Monkey-patch Session.__init__ so any future sessions pick up the proxy.
         if not getattr(requests.Session, "_ff_proxy_patched", False):
             _original_init = requests.Session.__init__
 
@@ -122,6 +105,32 @@ class CloudinaryProvider(BaseStorageProvider):
 
             requests.Session.__init__ = _patched_init
             requests.Session._ff_proxy_patched = True
+
+        # Force the cloudinary SDK to create its lazy session NOW (while the
+        # patched __init__ is in place), then update it directly.
+        try:
+            import cloudinary.http_client as _http_client
+            session = getattr(_http_client, "session", None)
+            if session is None:
+                # Trigger lazy session creation by calling a no-op request setup.
+                # The SDK creates the session on first use of get_http_connector().
+                if hasattr(_http_client, "get_http_connector"):
+                    _http_client.get_http_connector()
+                elif hasattr(_http_client, "HttpClient"):
+                    _http_client.HttpClient()
+                session = getattr(_http_client, "session", None)
+
+            if isinstance(session, requests.Session):
+                session.proxies.update(proxies)
+                session.trust_env = True
+                logger.info("Cloudinary: patched live http_client.session proxy")
+            else:
+                logger.info(
+                    "Cloudinary: session is %s — proxy will apply to next created session",
+                    type(session),
+                )
+        except Exception as exc:
+            logger.warning("Cloudinary: could not patch http_client.session: %s", exc)
 
 
     def _resource_type(self, override: str | None = None) -> str:
@@ -149,24 +158,6 @@ class CloudinaryProvider(BaseStorageProvider):
     ) -> UploadResult:
         self._configure()
         import cloudinary.uploader
-        import cloudinary.http_client as _http_client
-        import requests
-
-        # --- TEMP DEBUG ---
-        session = getattr(_http_client, "session", None)
-        logger.info("http_client.session type: %s", type(session))
-        logger.info("http_client.session proxies: %s", getattr(session, "proxies", "N/A"))
-        logger.info("http_client.session trust_env: %s", getattr(session, "trust_env", "N/A"))
-        logger.info("Session._ff_proxy_patched: %s", getattr(requests.Session, "_ff_proxy_patched", False))
-        import cloudinary
-        cfg = cloudinary.config()
-        logger.info("cloudinary.config api_proxy: %s", getattr(cfg, "api_proxy", "N/A"))
-        # --- END DEBUG ---
-
-        logger.info(
-            "Cloudinary upload — HTTPS_PROXY=%r",
-            os.environ.get("HTTPS_PROXY")
-        )
 
         options: dict[str, Any] = {
             "public_id": path,
@@ -180,7 +171,7 @@ class CloudinaryProvider(BaseStorageProvider):
             options["folder"] = folder
         try:
             response = cloudinary.uploader.upload(file, **options)
-        except Exception as exc:  # pragma: no cover
+        except Exception as exc:
             raise ProviderError(f"Cloudinary upload failed: {exc}") from exc
 
         return UploadResult(
