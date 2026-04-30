@@ -148,7 +148,20 @@ class CloudinaryProvider(BaseStorageProvider):
         **kwargs: Any,
     ) -> UploadResult:
         self._configure()
-        import os, cloudinary.uploader
+        import cloudinary.uploader
+        import cloudinary.http_client as _http_client
+        import requests
+
+        # --- TEMP DEBUG ---
+        session = getattr(_http_client, "session", None)
+        logger.info("http_client.session type: %s", type(session))
+        logger.info("http_client.session proxies: %s", getattr(session, "proxies", "N/A"))
+        logger.info("http_client.session trust_env: %s", getattr(session, "trust_env", "N/A"))
+        logger.info("Session._ff_proxy_patched: %s", getattr(requests.Session, "_ff_proxy_patched", False))
+        import cloudinary
+        cfg = cloudinary.config()
+        logger.info("cloudinary.config api_proxy: %s", getattr(cfg, "api_proxy", "N/A"))
+        # --- END DEBUG ---
 
         logger.info(
             "Cloudinary upload — HTTPS_PROXY=%r",
