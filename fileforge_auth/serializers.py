@@ -5,6 +5,8 @@ from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 
+from storage.models import StorageCredential
+
 from .models import ApiKey, App, DeveloperUser
 
 
@@ -66,6 +68,7 @@ class AppSerializer(serializers.ModelSerializer):
     """Full read representation of an App (no API keys embedded)."""
 
     api_key_count = serializers.SerializerMethodField()
+    configured_providers = serializers.SerializerMethodField()
 
     class Meta:
         model = App
@@ -76,6 +79,7 @@ class AppSerializer(serializers.ModelSerializer):
             "owner_slug",
             "is_active",
             "api_key_count",
+            "configured_providers",
             "created_at",
             "updated_at",
         )
@@ -83,12 +87,23 @@ class AppSerializer(serializers.ModelSerializer):
             "id",
             "owner_slug",
             "api_key_count",
+            "configured_providers",
             "created_at",
             "updated_at",
         )
 
     def get_api_key_count(self, obj: App) -> int:
         return obj.api_keys.filter(is_active=True).count()
+
+    def get_configured_providers(self, obj: App) -> list[str]:
+        """Return a sorted list of provider names that have credentials stored
+        for this app.  Use ``GET /auth/apps/{id}/providers/`` for the full
+        credential records (with secrets masked)."""
+        return list(
+            StorageCredential.objects.filter(owner=obj.owner_slug)
+            .order_by("provider")
+            .values_list("provider", flat=True)
+        )
 
 
 class AppCreateSerializer(serializers.ModelSerializer):
