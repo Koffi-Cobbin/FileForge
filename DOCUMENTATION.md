@@ -4,7 +4,7 @@ Developer Documentation
 
 *Pluggable Cloud Storage Bridge*
 
-Version 2.0 · April 2026
+Version 2.1 · May 2026
 
 **Table of Contents**
 
@@ -323,6 +323,24 @@ in a .env file. python-dotenv loads them automatically on startup.
 
 **3.3 Google Drive Credentials**
 
+The Google Drive provider supports two authentication modes. OAuth2 is tried
+first; if its keys are absent, the provider falls back to service account.
+
+*OAuth2 refresh-token mode (personal Drive accounts)*
+
+  ---------------------------------------------------------------------------------
+  **Variable**           **Required**   **Description**
+  ---------------------- -------------- -------------------------------------------
+  GOOGLE_CLIENT_ID       All three      OAuth2 client ID from Google Cloud Console.
+
+  GOOGLE_CLIENT_SECRET   All three      OAuth2 client secret.
+
+  GOOGLE_REFRESH_TOKEN   All three      Offline refresh token. Generate once with
+                                        the bundled generate_google_token.py script.
+  ---------------------------------------------------------------------------------
+
+*Service account mode (Google Workspace / shared drives)*
+
   ------------------------------------------------------------------------------
   **Variable**                  **Required**   **Description**
   ----------------------------- -------------- ---------------------------------
@@ -331,10 +349,16 @@ in a .env file. python-dotenv loads them automatically on startup.
 
   GOOGLE_SERVICE_ACCOUNT_FILE   One of the two Filesystem path to the service
                                                account key JSON file.
-
-  GOOGLE_DRIVE_FOLDER_ID        No             Parent folder ID where uploaded
-                                               files will be placed.
   ------------------------------------------------------------------------------
+
+*Shared optional setting (both modes)*
+
+  -----------------------------------------------------------------------
+  **Variable**           **Required**   **Description**
+  ---------------------- -------------- ---------------------------------
+  GOOGLE_DRIVE_FOLDER_ID No             Parent folder ID where uploaded
+                                        files will be placed.
+  -----------------------------------------------------------------------
 
 **3.4 Cloudinary Credentials**
 
@@ -1298,6 +1322,82 @@ with fields as form data. For Google Drive: PUT with the file body.
 
   -----------------------------------------------------------------------
 
+**6.7 File Streaming**
+
+**GET /api/files/{id}/stream/**
+
+Proxies the file bytes from its provider through FileForge to the caller.
+Supports HTTP Range requests so audio and video players can seek within files.
+All providers have a streaming implementation; Google Drive uses native 5 MB
+chunked streaming.
+
+  -----------------------------------------------------------------------
+  **Header**    **Required**   **Description**
+  ------------- -------------- ------------------------------------------
+  Authorization Yes            Bearer ffk\_\<api_key\>
+
+  Range         No             Byte range, e.g. bytes=0-1048575. If
+                               omitted, the full file is returned.
+  -----------------------------------------------------------------------
+
+***Request --- full file***
+
+  -----------------------------------------------------------------------
+  GET /api/files/43/stream/ HTTP/1.1
+
+  Authorization: Bearer ffk_xK3mAbc123\...
+  -----------------------------------------------------------------------
+
+***Response --- 200 OK***
+
+  -----------------------------------------------------------------------
+  Content-Type: audio/mpeg
+
+  Content-Length: 8388608
+
+  Accept-Ranges: bytes
+
+  Content-Disposition: inline; filename="track.mp3"
+
+  \<binary file bytes\>
+  -----------------------------------------------------------------------
+
+***Request --- byte range***
+
+  -----------------------------------------------------------------------
+  GET /api/files/43/stream/ HTTP/1.1
+
+  Authorization: Bearer ffk_xK3mAbc123\...
+
+  Range: bytes=0-1048575
+  -----------------------------------------------------------------------
+
+***Response --- 206 Partial Content***
+
+  -----------------------------------------------------------------------
+  HTTP/1.1 206 Partial Content
+
+  Content-Type: audio/mpeg
+
+  Content-Range: bytes 0-1048575/8388608
+
+  Content-Length: 1048576
+
+  Accept-Ranges: bytes
+  -----------------------------------------------------------------------
+
+***Error --- file not yet uploaded***
+
+  -----------------------------------------------------------------------
+  HTTP/1.1 404 Not Found
+
+  { \"detail\": \"File has no provider ID yet (upload may still be
+  pending).\" }
+  -----------------------------------------------------------------------
+
+To check whether a provider supports native streaming, inspect the
+supports_streaming field in GET /api/providers/.
+
 **7. Upload Flow Guide**
 
 **7.1 Choosing the Right Flow**
@@ -1421,25 +1521,98 @@ size threshold.
 
 **8.2 Google Drive**
 
-**Service Account Setup**
+The provider supports two authentication modes. OAuth2 is attempted first;
+service account is the fallback.
 
-31. In Google Cloud Console, create a service account.
+**Authentication Mode A --- OAuth2 Refresh Token (personal Drive accounts)**
 
-32. Share the target Drive folder with the service account email
-    address.
+Use this mode to upload into a personal Google Drive account (your own or a
+shared one you have authorized access to).
 
-33. Download a JSON key file.
+31. In Google Cloud Console, create an OAuth2 client ID of type
+    *Desktop application*.
 
-34. Set GOOGLE_SERVICE_ACCOUNT_JSON or GOOGLE_SERVICE_ACCOUNT_FILE.
+32. Run the bundled helper script to perform the one-time authorization
+    flow and obtain a refresh token:
 
-35. Set GOOGLE_DRIVE_FOLDER_ID to the target folder\'s ID.
+  -----------------------------------------------------------------------
+  python generate_google_token.py
+  -----------------------------------------------------------------------
+
+33. Copy the printed values into your environment:
+
+  -----------------------------------------------------------------------
+  GOOGLE_CLIENT_ID=\<client id\>
+
+  GOOGLE_CLIENT_SECRET=\<client secret\>
+
+  GOOGLE_REFRESH_TOKEN=\<refresh token\>
+  -----------------------------------------------------------------------
+
+The access token is refreshed automatically whenever it expires --- no
+manual intervention required.
+
+**Authentication Mode B --- Service Account (Workspace / shared drives)**
+
+Use this mode for Google Workspace or when you need to upload into a shared
+drive owned by a service account.
+
+34. In Google Cloud Console, create a service account.
+
+35. Share the target Drive folder with the service account email address.
+
+36. Download a JSON key file.
+
+37. Set GOOGLE_SERVICE_ACCOUNT_JSON or GOOGLE_SERVICE_ACCOUNT_FILE.
+
+38. Set GOOGLE_DRIVE_FOLDER_ID to the target folder\'s ID.
 
 -   Files uploaded without folder_id go to the service account root ---
     not visible to humans in Drive.
 
--   For direct upload, the client PUTs the file body to the resumable
-    session URL from the ticket. After upload, call /complete/ with the
-    Drive file ID in provider_file_id.
+**Credential fields (per-owner via POST /api/credentials/)**
+
+  -----------------------------------------------------------------------
+  **Field**              **Auth mode**    **Description**
+  ---------------------- ---------------- --------------------------------
+  oauth2_client_id       OAuth2           OAuth2 client ID.
+
+  oauth2_client_secret   OAuth2           OAuth2 client secret.
+
+  oauth2_refresh_token   OAuth2           Offline refresh token.
+
+  service_account_json   Service account  JSON key as a string or dict.
+
+  service_account_file   Service account  Path to the JSON key file.
+
+  folder_id              Both             Parent Drive folder ID.
+  -----------------------------------------------------------------------
+
+**Upload behaviour**
+
+All uploads use 5 MB resumable chunks (MediaIoBaseUpload resumable=True),
+matching the behaviour of the MuseWave-Backend implementation. This makes
+large file uploads reliable and restartable.
+
+**Streaming**
+
+The Google Drive provider implements native chunked streaming (supports_streaming:
+true). Use GET /api/files/{id}/stream/ to proxy file bytes through FileForge.
+The endpoint honours HTTP Range headers, enabling audio and video players to
+seek within files. See section 6.7 for full endpoint documentation.
+
+**Folder utilities**
+
+The provider exposes a find_or_create_folder(name, parent_id) helper that
+looks up a Drive folder by name under a given parent and creates it if absent.
+This is useful when calling the provider directly to build folder hierarchies
+before uploading.
+
+**Direct upload**
+
+For direct upload, the client PUTs the file body to the resumable session URL
+from the ticket. After upload, call /complete/ with the Drive file ID in
+provider_file_id.
 
 **8.3 Adding a Custom Provider**
 
@@ -1455,6 +1628,8 @@ size threshold.
 
   supports_direct_upload = False
 
+  supports_streaming = False \# set True if stream() is overridden
+
   def upload(self, file, path, \*, content_type=None, size=None,
   \*\*kwargs):
 
@@ -1469,7 +1644,20 @@ size threshold.
   def update(self, file_id, \*\*kwargs): \...
 
   def get_url(self, file_id, \*\*kwargs): \...
+
+  \# Optional: override stream() for chunked Range-aware delivery
+
+  def stream(self, file_id, \*, start=0, end=None, \*\*kwargs):
+
+  \# yield byte chunks; honour start/end byte offsets
+
+  yield self.download(file_id)\[start:end + 1 if end else None\]
   -----------------------------------------------------------------------
+
+If supports_streaming is True, the file is eligible for GET
+/api/files/{id}/stream/ with Range support. If it is False (the default),
+the base class fall-back implementation is used, which loads the full file
+into memory via download() before slicing --- fine for small files.
 
 37. Register it in storage/providers/registry.py inside
     register_default_providers():
@@ -2303,6 +2491,8 @@ is outside the web root and not accessible via MEDIA_URL or STATIC_URL.
 
   DELETE       /api/files/{id}/                        API Key    Delete file
 
+  GET          /api/files/{id}/stream/                 API Key    Stream file (Range-aware)
+
   POST         /api/files/direct-upload/               API Key    Initiate direct upload
 
   POST         /api/files/direct-upload/complete/      API Key    Finalize direct upload
@@ -2352,15 +2542,17 @@ is outside the web root and not accessible via MEDIA_URL or STATIC_URL.
 
 **17.4 Provider Credential Fields**
 
-  ------------------------------------------------------------------------
-  **Provider**    **Required fields**               **Optional fields**
-  --------------- --------------------------------- ----------------------
-  cloudinary      url OR (cloud_name + api_key +    folder, resource_type
-                  api_secret)
+  ---------------------------------------------------------------------------------------------------------------------------------------
+  **Provider**   **Required fields**                                      **Optional fields**
+  -------------- -------------------------------------------------------- ----------------------
+  cloudinary     url OR (cloud_name + api_key + api_secret)               folder, resource_type
 
-  google_drive    service_account_json OR           folder_id
-                  service_account_file
-  ------------------------------------------------------------------------
+  google_drive   OAuth2 mode: oauth2_client_id + oauth2_client_secret +   folder_id
+                 oauth2_refresh_token
+                 Service account mode: service_account_json OR
+                 service_account_file
+                 (OAuth2 is tried first; falls back to service account)
+  ---------------------------------------------------------------------------------------------------------------------------------------
 
 **17.5 Key Environment Variables**
 
@@ -2382,7 +2574,14 @@ is outside the web root and not accessible via MEDIA_URL or STATIC_URL.
 
   CLOUDINARY_URL                    Full Cloudinary connection URL
 
-  GOOGLE_SERVICE_ACCOUNT_JSON       Google service account key (JSON string)
+  GOOGLE_CLIENT_ID                  Google OAuth2 client ID (personal Drive)
 
-  GOOGLE_DRIVE_FOLDER_ID            Target Drive folder ID
+  GOOGLE_CLIENT_SECRET              Google OAuth2 client secret (personal Drive)
+
+  GOOGLE_REFRESH_TOKEN              Google OAuth2 refresh token (personal Drive)
+
+  GOOGLE_SERVICE_ACCOUNT_JSON       Google service account key (Workspace/shared
+                                    drive, JSON string)
+
+  GOOGLE_DRIVE_FOLDER_ID            Target Drive folder ID (both auth modes)
   -----------------------------------------------------------------------------
