@@ -10,7 +10,7 @@ directly. The manager is responsible for:
 """
 from __future__ import annotations
 
-from typing import Any, BinaryIO, Mapping
+from typing import Any, BinaryIO, Generator, Mapping
 
 from django.conf import settings
 
@@ -76,6 +76,7 @@ class StorageManager:
             {
                 "name": name,
                 "supports_direct_upload": cls.supports_direct_upload,
+                "supports_streaming": cls.supports_streaming,
             }
             for name, cls in sorted(registry.items())
         ]
@@ -172,3 +173,24 @@ class StorageManager:
         owner: str | None = None,
     ) -> UploadResult:
         return _build_provider(provider, owner).finalize_direct_upload(data)
+
+    @staticmethod
+    def stream(
+        provider: str,
+        file_id: str,
+        *,
+        owner: str | None = None,
+        start: int = 0,
+        end: int | None = None,
+        **kwargs: Any,
+    ) -> Generator[bytes, None, None]:
+        """Yield byte chunks for *file_id*, optionally honouring a byte Range.
+
+        Delegates to the provider's ``stream()`` method.  All providers have a
+        default implementation that falls back to ``download()`` and slices the
+        result; providers like Google Drive override it with a true chunked
+        streaming implementation (adapted from MuseWave-Backend).
+        """
+        return _build_provider(provider, owner).stream(
+            file_id, start=start, end=end, **kwargs
+        )

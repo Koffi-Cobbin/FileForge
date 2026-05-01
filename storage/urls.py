@@ -8,6 +8,7 @@ from .views import (
     DirectUploadInitView,
     FileDetailView,
     FileListCreateView,
+    FileStreamView,
     HealthView,
     ProviderListView,
     StorageCredentialDetailView,
@@ -39,4 +40,5 @@ urlpatterns = [
         name="file-direct-upload-complete",
     ),
     path("files/<int:pk>/", FileDetailView.as_view(), name="file-detail"),
+    path("files/<int:pk>/stream/", FileStreamView.as_view(), name="file-stream"),
 ]

@@ -49,15 +49,34 @@ python manage.py migrate --noinput && python manage.py qcluster &
 exec gunicorn --bind 0.0.0.0:5000 --workers 2 fileforge.wsgi:application
 ```
 
+## Google Drive provider — auth modes
+
+The provider supports two authentication modes (adapted from MuseWave-Backend):
+
+| Mode | Credentials | Best for |
+| --- | --- | --- |
+| OAuth2 refresh token | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN` | Personal Drive accounts |
+| Service account | `GOOGLE_SERVICE_ACCOUNT_JSON` or `GOOGLE_SERVICE_ACCOUNT_FILE` | Google Workspace / shared drives |
+
+OAuth2 is tried first; falls back to service account if OAuth2 keys are absent.
+Both modes accept an optional `GOOGLE_DRIVE_FOLDER_ID` to scope uploads to a sub-folder.
+
+Additional capabilities adapted from MuseWave-Backend:
+- **Chunked/resumable uploads** — 5 MB chunks via `MediaIoBaseUpload(resumable=True)`.
+- **Range-aware streaming** — `GET /api/files/<id>/stream/` proxies the file in 5 MB chunks and honours `Range` headers, enabling seek in audio/video players.
+- **`find_or_create_folder(name, parent_id)`** — utility on the provider to auto-create Drive folder hierarchies.
+- **`supports_streaming: true`** flag visible on `GET /api/providers/`.
+
 ## Required environment variables (production)
 
 Set these as Replit Secrets before publishing:
 
-- `SESSION_SECRET` — Django `SECRET_KEY`
-- `GOOGLE_SERVICE_ACCOUNT_JSON` (or `GOOGLE_SERVICE_ACCOUNT_FILE`) and
-  `GOOGLE_DRIVE_FOLDER_ID` — for the Google Drive provider
-- `CLOUDINARY_URL` (or `CLOUDINARY_CLOUD_NAME` + `CLOUDINARY_API_KEY` +
-  `CLOUDINARY_API_SECRET`) — for the Cloudinary provider
+- `SECRET_KEY` — Django `SECRET_KEY`
+- Google Drive (pick one auth mode):
+  - OAuth2: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN`
+  - Service account: `GOOGLE_SERVICE_ACCOUNT_JSON` (or `GOOGLE_SERVICE_ACCOUNT_FILE`)
+  - Shared: `GOOGLE_DRIVE_FOLDER_ID` (optional)
+- Cloudinary: `CLOUDINARY_URL` (or `CLOUDINARY_CLOUD_NAME` + `CLOUDINARY_API_KEY` + `CLOUDINARY_API_SECRET`)
 
 Optional tunables: `FILEFORGE_DEFAULT_MAX_SYNC_SIZE`,
 `FILEFORGE_GOOGLE_DRIVE_MAX_SYNC_SIZE`, `FILEFORGE_CLOUDINARY_MAX_SYNC_SIZE`,

@@ -12,7 +12,7 @@ import from a concrete provider module.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, BinaryIO, Mapping
+from typing import Any, BinaryIO, Generator, Mapping
 
 
 class ProviderError(Exception):
@@ -121,8 +121,32 @@ class BaseStorageProvider:
         )
 
     # ------------------------------------------------------------------
+    # Streaming support (optional)
+    # ------------------------------------------------------------------
+
+    def stream(
+        self,
+        file_id: str,
+        *,
+        start: int = 0,
+        end: int | None = None,
+        **kwargs: Any,
+    ) -> Generator[bytes, None, None]:
+        """Yield byte chunks for ``file_id``, optionally honoring Range offsets.
+
+        Providers that support streaming should set ``supports_streaming = True``
+        and override this method.  The default implementation falls back to
+        ``download()`` and yields the relevant slice in one chunk.
+        """
+        data = self.download(file_id, **kwargs)
+        yield data[start: None if end is None else end + 1]
+
+    # ------------------------------------------------------------------
     # Capability flags
     # ------------------------------------------------------------------
 
     #: Whether this provider supports the direct-upload flow.
     supports_direct_upload: bool = False
+
+    #: Whether this provider natively streams in chunks (Range-request aware).
+    supports_streaming: bool = False

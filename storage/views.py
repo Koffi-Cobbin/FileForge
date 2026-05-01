@@ -14,6 +14,7 @@ API key is present.
 from __future__ import annotations
 
 from django.conf import settings
+from django.http import StreamingHttpResponse
 from django.shortcuts import get_object_or_404
 from django_q.tasks import async_task
 from rest_framework import generics, status
@@ -416,3 +417,71 @@ class HealthView(APIView):
 
     def get(self, request):
         return Response({"status": "ok", "providers": registry.names()})
+
+
+class FileStreamView(APIView):
+    """``GET /api/files/<pk>/stream/`` — proxy-stream a file from its provider.
+
+    Supports HTTP Range requests so clients can seek within audio/video files.
+    Only available for providers that expose the ``stream()`` method (e.g.
+    Google Drive with OAuth2 or service-account credentials).
+
+    Adapted from MuseWave-Backend's streaming infrastructure.
+    """
+
+    authentication_classes = [ApiKeyAuthentication]
+    permission_classes = [IsAuthenticatedApp]
+
+    def get(self, request, pk):
+        owner = _resolve_owner(request)
+        file_obj = get_object_or_404(File, pk=pk, owner=owner)
+
+        if not file_obj.provider_file_id:
+            return Response(
+                {"detail": "File has no provider ID yet (upload may still be pending)."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Parse Range header (e.g. "bytes=0-1023")
+        range_header = request.headers.get("Range", "")
+        start = 0
+        end = None
+        if range_header.startswith("bytes="):
+            parts = range_header[6:].split("-")
+            try:
+                start = int(parts[0]) if parts[0] else 0
+                end = int(parts[1]) if len(parts) > 1 and parts[1] else None
+            except ValueError:
+                pass
+
+        try:
+            chunk_gen = StorageManager.stream(
+                file_obj.provider,
+                file_obj.provider_file_id,
+                owner=owner,
+                start=start,
+                end=end,
+            )
+        except Exception as exc:
+            return _provider_error_response(exc)
+
+        content_type = file_obj.content_type or "application/octet-stream"
+        response = StreamingHttpResponse(chunk_gen, content_type=content_type)
+
+        if range_header:
+            # Partial content
+            content_length = (end - start + 1) if end is not None else ""
+            response["Content-Range"] = (
+                f"bytes {start}-{end if end is not None else '*'}/"
+                f"{file_obj.size or '*'}"
+            )
+            response["Content-Length"] = content_length
+            response.status_code = 206
+        elif file_obj.size:
+            response["Content-Length"] = file_obj.size
+
+        response["Accept-Ranges"] = "bytes"
+        response["Content-Disposition"] = (
+            f'inline; filename="{file_obj.name}"'
+        )
+        return response

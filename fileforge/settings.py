@@ -222,8 +222,15 @@ FILEFORGE_PROVIDER_MAX_SYNC_SIZE = {
 # ---------------------------------------------------------------------------
 FILEFORGE_PROVIDER_ENV_CREDENTIALS = {
     "google_drive": {
+        # --- Service account auth (Workspace / shared drives) ---
         "service_account_json": os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON"),
         "service_account_file": os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE"),
+        # --- OAuth2 refresh-token auth (personal Drive accounts) ---
+        # Generate with: python generate_google_token.py
+        "oauth2_client_id": os.environ.get("GOOGLE_CLIENT_ID"),
+        "oauth2_client_secret": os.environ.get("GOOGLE_CLIENT_SECRET"),
+        "oauth2_refresh_token": os.environ.get("GOOGLE_REFRESH_TOKEN"),
+        # --- Shared ---
         "folder_id": os.environ.get("GOOGLE_DRIVE_FOLDER_ID"),
     },
     "cloudinary": {
