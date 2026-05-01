@@ -13,6 +13,7 @@ from .views import (
     MeView,
     RegisterView,
 )
+from storage.views import AppProviderDetailView, AppProviderListCreateView
 
 urlpatterns = [
     # ── Auth ────────────────────────────────────────────────────────────────
@@ -31,4 +32,8 @@ urlpatterns = [
     # ── API Keys ────────────────────────────────────────────────────────────
     path("apps/<int:app_id>/keys/", ApiKeyListCreateView.as_view(), name="auth-key-list"),
     path("apps/<int:app_id>/keys/<int:key_id>/revoke/", ApiKeyRevokeView.as_view(), name="auth-key-revoke"),
+
+    # ── Provider credentials (JWT-authenticated, frontend console) ──────────
+    path("apps/<int:app_id>/providers/", AppProviderListCreateView.as_view(), name="auth-provider-list"),
+    path("apps/<int:app_id>/providers/<str:provider>/", AppProviderDetailView.as_view(), name="auth-provider-detail"),
 ]

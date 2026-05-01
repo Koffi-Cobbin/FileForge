@@ -8,8 +8,8 @@ remain in storage/views.py and will be updated to use IsAuthenticatedApp.
 
 URL layout (mounted at /auth/):
   POST   /auth/register/
-  POST   /auth/token/            ← provided by SimpleJWT
-  POST   /auth/token/refresh/    ← provided by SimpleJWT
+  POST   /auth/token/                          ← provided by SimpleJWT
+  POST   /auth/token/refresh/                  ← provided by SimpleJWT
   GET    /auth/me/
   PATCH  /auth/me/
   POST   /auth/me/change-password/
@@ -17,6 +17,8 @@ URL layout (mounted at /auth/):
   GET PATCH DELETE /auth/apps/{id}/
   GET POST /auth/apps/{id}/keys/
   POST   /auth/apps/{id}/keys/{key_id}/revoke/
+  GET POST /auth/apps/{id}/providers/          ← provider credential management
+  GET PATCH DELETE /auth/apps/{id}/providers/{provider}/
 """
 from __future__ import annotations
 

@@ -21,10 +21,11 @@ from rest_framework import generics, status
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from fileforge_auth.authentication import ApiKeyAuthentication
-from fileforge_auth.models import ApiKey
-from fileforge_auth.permissions import IsAuthenticatedApp
+from fileforge_auth.models import ApiKey, App
+from fileforge_auth.permissions import IsAuthenticatedApp, IsAuthenticatedDeveloper
 
 from .models import File, FileStatus, StorageCredential
 from .providers import (
@@ -34,12 +35,14 @@ from .providers import (
     registry,
 )
 from .serializers import (
+    AppProviderCredentialSerializer,
     DirectUploadCompleteSerializer,
     DirectUploadInitSerializer,
     FilePatchSerializer,
     FileSerializer,
     FileUploadSerializer,
     StorageCredentialSerializer,
+    merge_credentials,
 )
 from .services import StorageManager
 from .utils import (
@@ -485,3 +488,109 @@ class FileStreamView(APIView):
             f'inline; filename="{file_obj.name}"'
         )
         return response
+
+
+# ---------------------------------------------------------------------------
+# JWT-authenticated provider credential management (frontend console)
+# ---------------------------------------------------------------------------
+
+class AppProviderListCreateView(APIView):
+    """``GET|POST /auth/apps/{app_id}/providers/``
+
+    Allows a developer (authenticated via JWT) to list and create/update
+    storage-provider credentials for one of their apps.
+
+    * GET  — returns all stored credentials for the app, with secret fields
+             masked as ``"***"``.
+    * POST — upserts (create-or-update) a credential set for the given
+             ``provider``.  Any field sent as ``"***"`` is treated as
+             *unchanged* so partial updates never wipe stored secrets.
+    """
+
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticatedDeveloper]
+
+    def _get_app(self, request, app_id: int) -> App:
+        return get_object_or_404(App, pk=app_id, developer=request.user)
+
+    def get(self, request, app_id: int):
+        app = self._get_app(request, app_id)
+        qs = StorageCredential.objects.filter(owner=app.owner_slug).order_by("provider")
+        s = AppProviderCredentialSerializer(qs, many=True)
+        return Response(s.data)
+
+    def post(self, request, app_id: int):
+        app = self._get_app(request, app_id)
+        s = AppProviderCredentialSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+
+        provider = s.validated_data["provider"]
+        incoming_creds = s.validated_data.get("credentials", {})
+        is_default = s.validated_data.get("is_default", True)
+
+        # Merge with any existing credential so sentinels don't erase secrets.
+        existing_obj = StorageCredential.objects.filter(
+            owner=app.owner_slug, provider=provider
+        ).first()
+        existing_creds = existing_obj.credentials if existing_obj else {}
+        merged_creds = merge_credentials(existing_creds, incoming_creds)
+
+        credential, created = StorageCredential.objects.update_or_create(
+            owner=app.owner_slug,
+            provider=provider,
+            defaults={"credentials": merged_creds, "is_default": is_default},
+        )
+
+        return Response(
+            AppProviderCredentialSerializer(credential).data,
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+
+class AppProviderDetailView(APIView):
+    """``GET|PATCH|DELETE /auth/apps/{app_id}/providers/{provider}/``
+
+    * GET    — returns the credential for *provider*, secrets masked.
+    * PATCH  — merges the incoming ``credentials`` dict into the stored one.
+               Fields sent as ``"***"`` are left untouched (sentinel logic).
+    * DELETE — removes the credential entirely.
+    """
+
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticatedDeveloper]
+
+    def _get_app(self, request, app_id: int) -> App:
+        return get_object_or_404(App, pk=app_id, developer=request.user)
+
+    def _get_credential(self, app: App, provider: str) -> StorageCredential:
+        return get_object_or_404(
+            StorageCredential, owner=app.owner_slug, provider=provider
+        )
+
+    def get(self, request, app_id: int, provider: str):
+        app = self._get_app(request, app_id)
+        credential = self._get_credential(app, provider)
+        return Response(AppProviderCredentialSerializer(credential).data)
+
+    def patch(self, request, app_id: int, provider: str):
+        app = self._get_app(request, app_id)
+        credential = self._get_credential(app, provider)
+
+        s = AppProviderCredentialSerializer(data=request.data, partial=True)
+        s.is_valid(raise_exception=True)
+
+        incoming_creds = s.validated_data.get("credentials", {})
+        credential.credentials = merge_credentials(
+            credential.credentials or {}, incoming_creds
+        )
+        if "is_default" in s.validated_data:
+            credential.is_default = s.validated_data["is_default"]
+
+        credential.save(update_fields=["credentials", "is_default", "updated_at"])
+        return Response(AppProviderCredentialSerializer(credential).data)
+
+    def delete(self, request, app_id: int, provider: str):
+        app = self._get_app(request, app_id)
+        credential = self._get_credential(app, provider)
+        credential.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
